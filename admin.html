@@ -39,6 +39,12 @@
   th, td { padding:8px 8px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; vertical-align:middle; }
   th { color:var(--muted); font-weight:600; font-size:12px; position:sticky; top:0; background:var(--panel); }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  /* Keep student identity visible without depending on the email column width. */
+  #users th[data-k="name"], #users td.user-name { position:sticky; left:0; background:var(--panel); z-index:1; box-shadow:1px 0 var(--line); }
+  #users th { z-index:2; }
+  #users th[data-k="name"] { z-index:3; }
+  #users tbody tr:nth-child(even) td.user-name { background:#f8fafc; }
+  #users tbody tr:hover td.user-name { background:#eaf1ff; }
   .tbl-wrap { overflow:auto; max-height:560px; }
   .tag { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11.5px; font-weight:700; }
   .tag.ok { background:#e3f8ec; color:#158048; } .tag.warn { background:#fff0d9; color:#b5731a; }
@@ -49,6 +55,9 @@
   .page { display:none; } .page.active { display:block; }
   .overlay { position:fixed; inset:0; background:rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center; z-index:9; }
   .modal { background:var(--panel); border-radius:14px; padding:22px 24px; width:520px; max-width:95vw; max-height:92vh; overflow:auto; box-shadow:0 18px 50px rgba(0,0,0,.3); }
+  .modal { position:relative; }
+  .grant-heading { padding-right:36px; }
+  .grant-close { position:absolute; top:12px; right:12px; width:32px; height:32px; padding:0; font-size:24px; line-height:1; }
   .modal h3 { margin:0 0 4px; } .modal .sub { color:var(--muted); font-size:12.5px; margin-bottom:14px; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px 14px; }
   textarea { width:100%; min-height:120px; font-family:Consolas,monospace; font-size:12.5px; }
@@ -400,7 +409,7 @@
 </div>
 
 <!-- 모달 -->
-<div id="modal" class="overlay hidden" onclick="if(event.target===this)closeModal()"><div class="modal" id="modalBody"></div></div>
+<div id="modal" class="overlay hidden" onclick="if(event.target===this)dismissModal()"><div class="modal" id="modalBody"></div></div>
 <div id="toast" class="toast hidden"></div>
 
 <script>
@@ -648,7 +657,7 @@ function renderUsers() {
     const lp = u.last_payment;
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${esc(u.email)}</td><td>${esc(u.name || "")}${u.student_code ? ` <small class="muted">[${esc(u.student_code)}]</small>` : ""}</td><td>${esc(u.deposit_name || "")}</td><td><span class="tag ${cls}">${st}</span></td>
+      <td>${esc(u.email)}</td><td class="user-name">${esc(u.name || "")}${u.student_code ? ` <small class="muted">[${esc(u.student_code)}]</small>` : ""}</td><td>${esc(u.deposit_name || "")}</td><td><span class="tag ${cls}">${st}</span></td>
       <td>${u.active_until || "-"}</td>
       <td class="num">${num(u.quota_monthly)}</td><td class="num">${num(u.quota_used)}</td><td class="num">${num(u.quota_extra)}</td>
       <td class="num"><b>${num(left)}</b></td>
@@ -803,16 +812,18 @@ async function depApply() {
 }
 
 // ── 모달 ────────────────────────────────────────────
-function openModal(html) { $("modalBody").innerHTML = html; $("modal").classList.remove("hidden"); const f = $("modalBody").querySelector("input:not([type=date]),select"); if (f) setTimeout(() => f.focus(), 30); }
+function openModal(html, explicitCloseOnly = false) { $("modal").dataset.explicitCloseOnly = String(explicitCloseOnly); $("modalBody").innerHTML = html; $("modal").classList.remove("hidden"); const f = $("modalBody").querySelector("input:not([type=date]),select"); if (f) setTimeout(() => f.focus(), 30); }
 function closeModal() { $("modal").classList.add("hidden"); }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("modal").classList.contains("hidden")) closeModal(); });
+function dismissModal() { if ($("modal").dataset.explicitCloseOnly !== "true") closeModal(); }
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("modal").classList.contains("hidden")) dismissModal(); });
 function grantModal(id) {
   const u = users.find((x) => x.id === id); if (!u) return;
   const b = config.billing_info || {};
   const today = new Date().toISOString().slice(0, 10);
   const fromDefault = u.active_until && u.active_until >= today ? u.active_until : today;
   openModal(`
-    <h3>이용권 부여 — ${esc(u.email)}</h3>
+    <button type="button" class="btn ghost grant-close" aria-label="이용권 부여 닫기" title="이용권 부여 닫기" onclick="closeModal()">×</button>
+    <h3 class="grant-heading">이용권 부여 — ${esc(u.email)}</h3>
     <div class="sub">현재 만료일 ${u.active_until || "없음"} · 월 DB ${num(u.quota_monthly)} · 추가분 ${num(u.quota_extra)}</div>
     <div class="row" style="margin-bottom:10px">
       <label style="display:flex;align-items:center;gap:5px"><input type="radio" name="g_mode" value="months" checked onchange="grantModeChanged()"> 개월로 연장</label>
@@ -827,8 +838,8 @@ function grantModal(id) {
       <div class="field"><label>월 DB한도 변경 (선택, 비우면 유지)</label><input id="g_monthly" type="number" placeholder="${num(u.quota_monthly)}"></div>
       <div class="field" style="grid-column:1/-1"><label>메모 (입금자명, 날짜 등)</label><input id="g_note"></div>
     </div>
-    <div class="row" style="justify-content:flex-end"><button class="btn ghost" onclick="closeModal()">취소</button><button class="btn" onclick="doGrant('${id}')">부여</button></div>
-    <div class="msg" id="mMsg"></div>`);
+    <div class="row" style="justify-content:flex-end"><button class="btn" onclick="doGrant('${id}')">부여</button></div>
+    <div class="msg" id="mMsg"></div>`, true);
 }
 function grantModeChanged() {
   const range = document.querySelector('input[name="g_mode"]:checked').value === "range";
