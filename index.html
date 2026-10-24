@@ -83,6 +83,7 @@
 </style>
 </head>
 <body>
+<div id="dataStatus" role="status" aria-live="polite" style="position:sticky;top:0;z-index:40;background:#fff3cd;padding:10px">마지막 성공: 없음 · 데이터를 불러오세요. 변경 작업이 잠겨 있습니다.</div>
 <div class="wrap">
 
   <!-- 연결/로그인 -->
@@ -409,7 +410,7 @@
 </div>
 
 <!-- 모달 -->
-<div id="modal" class="overlay hidden" onclick="if(event.target===this)dismissModal()"><div class="modal" id="modalBody"></div></div>
+<div id="modal" class="overlay hidden" onclick="if(event.target===this)dismissModal()"><div class="modal" id="modalBody" role="dialog" aria-modal="true"></div></div>
 <div id="toast" class="toast hidden"></div>
 
 <script>
@@ -425,15 +426,64 @@ const num = (n) => Math.round(Number(n) || 0).toLocaleString("ko-KR");
 const won = (n) => num(n) + "원";
 function toast(m, ms = 2600) { const t = $("toast"); t.textContent = m; t.classList.toggle("err", /실패|오류/.test(m)); t.classList.remove("hidden"); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add("hidden"), ms); }
 
+// Freshness belongs to the dataset, never to a cached row or a rendered page.
+const dataStates = new Map();
+let mutationPending = false;
+const staleReason = "최신 데이터를 확인할 수 없습니다. 새로고침 성공 후 다시 시도하세요.";
+const safeError = () => "요청 실패: 연결과 권한을 확인하고 다시 시도하세요.";
+function datasetState(key) {
+  if (!dataStates.has(key)) dataStates.set(key, {generation:0, status:"absent", lastSuccess:null});
+  return dataStates.get(key);
+}
+function showDataStatus() {
+  const labels = {core:"수강생·설정·정산", payments:"입금 내역", log:"관리자 로그", activity:"활동 로그", coupang:"쿠팡 통계", trend:"활동 추이"};
+  const entries = [...dataStates];
+  $("dataStatus").textContent = entries.length ? entries.map(([key,s]) =>
+    `${labels[key] || "데이터"} · 마지막 성공: ${s.lastSuccess || "없음"} · ${s.status === "fresh" ? "최신" : s.status === "refreshing" ? "새로고침 중 — 변경 잠김" : "오래된 데이터/오프라인 — 변경 잠김"}`).join(" | ") : staleReason;
+}
+function requireFresh(...keys) {
+  if (!mutationPending && keys.every(key => datasetState(key).status === "fresh")) return true;
+  toast(staleReason, 5000); return false;
+}
+function beginDataset(key) {
+  const state = datasetState(key); ++state.generation; state.status = "refreshing"; showDataStatus(); return state.generation;
+}
+function settleDataset(key, generation, success) {
+  const state = datasetState(key); if (generation !== state.generation) return;
+  state.status = success ? "fresh" : "stale";
+  if (success) state.lastSuccess = new Date().toISOString();
+  showDataStatus();
+}
+async function freshLoad(key, fetchData, apply) {
+  const state = datasetState(key), generation = ++state.generation;
+  state.status = "refreshing"; showDataStatus();
+  try {
+    const value = await fetchData();
+    if (generation !== state.generation) return;
+    if (key === "core" && mutationPending) { state.status = "stale"; return; }
+    apply(value);
+    state.status = "fresh"; state.lastSuccess = new Date().toISOString();
+  } catch (e) {
+    if (generation !== state.generation) return;
+    state.status = "stale"; toast(safeError());
+  } finally { if (generation === state.generation) showDataStatus(); }
+}
+
 // ── 연결/로그인 ─────────────────────────────────────
 try { $("sbUrl").value = localStorage.getItem("sb_url") || ""; $("sbKey").value = localStorage.getItem("sb_key") || ""; $("email").value = localStorage.getItem("sb_email") || ""; } catch {}
 if (!$("sbUrl").value) $("sbUrl").value = DEFAULT_SB_URL;
 if (!$("sbKey").value) $("sbKey").value = DEFAULT_SB_KEY;
 async function rpc(name, params = {}) {
-  const { data, error } = await sb.rpc(name, params);
-  if (error) throw new Error(error.message);
-  if (data && data.ok === false) throw new Error(data.error || "서버 오류");
-  return data;
+  const mutation = /^admin_/.test(name) && !["admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
+  if (mutation && !requireFresh("core")) throw Error("stale");
+  if (mutation) { mutationPending = true; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
+  try {
+    const { data, error } = await sb.rpc(name, params);
+    if (error || (data && data.ok === false)) throw new Error(safeError());
+    return data;
+  } finally {
+    if (mutation) { mutationPending = false; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
+  }
 }
 async function doLogin() {
   const url = $("sbUrl").value.trim(), key = $("sbKey").value.trim();
@@ -452,7 +502,7 @@ async function doLogin() {
     msg.textContent = "";
     await reloadAll();
     try { const t = localStorage.getItem("adm_tab"); if (t && t !== "users") gotoTab(t); } catch {}
-  } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
+  } catch (e) { msg.className = "msg err"; msg.textContent = safeError(); }
 }
 async function doLogout() { try { await sb.auth.signOut(); } catch {} location.reload(); }
 
@@ -462,7 +512,7 @@ async function doLogout() { try { await sb.auth.signOut(); } catch {} location.r
 async function backupAll() {
   toast("백업 모으는 중…", 60000);
   const out = { exported_at: new Date().toISOString(), by: (sb.auth && (await sb.auth.getUser()).data?.user?.email) || "", errors: {} };
-  const grab = async (key, fn) => { try { out[key] = await fn(); } catch (e) { out.errors[key] = String(e.message || e); } };
+  const grab = async (key, fn) => { try { out[key] = await fn(); } catch (e) { out.errors[key] = safeError(); } };
   await grab("app_config", async () => { const r = await sb.from("app_config").select("key,value"); if (r.error) throw r.error; return r.data; });
   await grab("stats", () => rpc("admin_stats"));
   await grab("users", () => rpc("admin_users"));
@@ -552,18 +602,16 @@ async function refreshPublicRelease() {
 // End public release
 
 async function reloadAll() {
-  try {
-    const [st, us, cfg, rbd] = await Promise.all([rpc("admin_stats"), rpc("admin_users"), sb.from("app_config").select("key,value"),
-                                                   rpc("admin_rebates").catch(() => null)]);
-    config = {}; (cfg.data || []).forEach((r) => (config[r.key] = r.value));
-    rbData = rbd;
-    users = us.users || [];
-    renderStats(st);
-    renderUsers();
-    fillConfig();
-    refreshPublicRelease();
+  await freshLoad("core", async () => {
+    const [st, us, cfg, rbd] = await Promise.all([rpc("admin_stats"), rpc("admin_users"), sb.from("app_config").select("key,value"), rpc("admin_rebates")]);
+    if (cfg.error || !Array.isArray(cfg.data) || !Array.isArray(us?.users) || !Array.isArray(rbd?.students)) throw Error("dataset");
+    return {st, us, cfg, rbd};
+  }, ({st, us, cfg, rbd}) => {
+    config = {}; (cfg.data || []).forEach(r => config[r.key] = r.value);
+    rbData = rbd; users = us.users || [];
+    renderStats(st); renderUsers(); fillConfig(); refreshPublicRelease();
     if ($("page-rebate").classList.contains("active") && rbData) { renderRebate(); renderRefund(); renderAnnual(); }
-  } catch (e) { toast("불러오기 실패: " + e.message); }
+  });
 }
 function renderStats(s) {
   const items = [
@@ -702,10 +750,11 @@ function versionCell(u) {
   return `<span class="tag ${u.app_version === latest ? "ok" : "warn"}" title="마지막 로그인${seen}">${esc(u.app_version)}</span>`;
 }
 async function resetDevice(id) {
+  if (!requireFresh("core")) return;
   const u = users.find((x) => x.id === id); if (!u) return;
   if (!confirm(`${u.email} 의 기기 등록을 초기화할까요?\n다음 로그인하는 PC로 새로 등록됩니다 (PC 교체·포맷 시 사용).`)) return;
   try { await rpc("admin_reset_device", { p_user: id }); toast("기기 초기화됨"); await reloadAll(); }
-  catch (e) { toast("실패: " + e.message); }
+  catch (e) { toast("실패: " + safeError()); }
 }
 
 // ── 입금 내역 매칭 ──────────────────────────────────
@@ -714,7 +763,7 @@ const DEP_DESC_KEYS = ["보낸분", "입금자", "입금자명", "의뢰인", "�
 const DEP_IN_KEYS = ["입금액", "입금금액", "맡기신금액", "입금", "deposit", "credit"];
 const DEP_AMT_KEYS = ["거래금액", "금액", "amount"];
 const DEP_TYPE_KEYS = ["입출구분", "거래구분", "구분", "거래종류"];
-let depRows = [];
+let depRows = [], depGeneration = null;
 const normName = (s) => String(s || "").replace(/\s+/g, "").toLowerCase();
 const toNum = (v) => { const s = String(v ?? "").replace(/[^\d.-]/g, ""); const n = parseFloat(s); return isNaN(n) ? 0 : n; };
 function depGuess(h) {
@@ -743,11 +792,12 @@ async function depParse() {
   const buf = await f.arrayBuffer();
   let wb;
   try { wb = XLSX.read(buf, { type: "array", cellDates: true, codepage: 949 }); }
-  catch (e) { $("depMsg").textContent = "파일을 읽지 못했습니다: " + e.message; return; }
+  catch (e) { $("depMsg").textContent = "파일을 읽지 못했습니다: " + safeError(); return; }
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: "" });
   await depAnalyze(rows);
 }
 async function depAnalyze(rows) {
+  if (!requireFresh("core")) return;
   // 헤더 줄: 날짜열 + (입금액 or 금액)열이 같이 잡히는 첫 줄
   let hr = -1, map = {};
   for (let i = 0; i < Math.min(40, rows.length); i++) {
@@ -757,8 +807,12 @@ async function depAnalyze(rows) {
   if (hr < 0) { $("depMsg").textContent = "헤더(거래일/입금액/내용)를 찾지 못했습니다. 은행 거래내역 파일이 맞는지 확인하세요."; return; }
   const price = Number($("depAmount").value) || Number((config.billing_info || {}).price) || 0;
   const any = $("depAnyAmount").checked;
+  const generation = datasetState("core").generation;
+  depRows = [];
   const existing = new Set(); // 이미 처리한 입금 (payments.note)
-  try { const r = await rpc("admin_payments", { p_limit: 1000 }); (r.payments || []).forEach((p) => { if (p.note) existing.add(p.note); }); } catch {}
+  try { const r = await rpc("admin_payments", { p_limit: 1000 }); if (!Array.isArray(r?.payments)) throw Error("dataset"); r.payments.forEach((p) => { if (p.note) existing.add(p.note); }); } catch { toast(safeError()); return; }
+  if (!requireFresh("core") || generation !== datasetState("core").generation) return;
+  depGeneration = datasetState("core").generation;
   const students = users.filter((u) => !u.is_admin);
   depRows = [];
   for (const r of rows.slice(hr + 1)) {
@@ -796,14 +850,23 @@ async function depAnalyze(rows) {
 }
 function depToggleAll() { const on = $("depAll").checked; document.querySelectorAll("#depTable tbody input[type=checkbox]:not(:disabled)").forEach((c) => (c.checked = on)); }
 async function depApply() {
+  if (!requireFresh("core")) return;
+  if (depGeneration !== datasetState("core").generation) { toast("수강생 정보가 갱신되었습니다. 입금 파일을 다시 분석하세요."); return; }
   const months = Number($("depMonths").value) || 1;
   const picks = [...document.querySelectorAll("#depTable tbody input[type=checkbox]:checked")].map((c) => depRows[Number(c.dataset.i)]).filter((d) => d && d.sel && !d.done);
   if (!picks.length) { toast("선택된 건이 없습니다"); return; }
   if (!confirm(`${picks.length}건에 각각 ${months}개월 연장을 적용할까요?`)) return;
   $("depApplyBtn").disabled = true; let ok = 0, fail = 0;
   for (const d of picks) {
-    try { await rpc("admin_grant", { p_user: d.sel, p_months: months, p_amount: Math.round(d.amt), p_note: d.note }); d.done = true; ok++; }
-    catch (e) { fail++; console.error(e); }
+    try { if (!requireFresh("core")) break;
+      const generation = datasetState("core").generation;
+      const payments = await rpc("admin_payments", {p_limit:1000});
+      if (!requireFresh("core") || generation !== datasetState("core").generation) break;
+      if (!Array.isArray(payments?.payments)) throw Error("dataset");
+      if (!users.some(u => u.id === d.sel)) { toast(staleReason); break; }
+      if (payments.payments.some(p => p.note === d.note)) { d.done = true; continue; }
+      await rpc("admin_grant", { p_user: d.sel, p_months: months, p_amount: Math.round(d.amt), p_note: d.note }); d.done = true; ok++; await reloadAll(); }
+    catch (e) { fail++; console.error(safeError()); }
   }
   $("depResult").textContent = `적용 ${ok}건${fail ? ` / 실패 ${fail}건` : ""}`;
   toast(`연장 적용 ${ok}건`);
@@ -812,11 +875,51 @@ async function depApply() {
 }
 
 // ── 모달 ────────────────────────────────────────────
-function openModal(html, explicitCloseOnly = false) { $("modal").dataset.explicitCloseOnly = String(explicitCloseOnly); $("modalBody").innerHTML = html; $("modal").classList.remove("hidden"); const f = $("modalBody").querySelector("input:not([type=date]),select"); if (f) setTimeout(() => f.focus(), 30); }
-function closeModal() { $("modal").classList.add("hidden"); }
+let modalTrigger = null, modalBackground = [];
+function modalControls() {
+  return [...$("modalBody").querySelectorAll('button,input,select,textarea,a[href],[tabindex]')]
+    .filter(e => !e.disabled && e.tabIndex >= 0 && e.getClientRects().length);
+}
+function openModal(html, explicitCloseOnly = false) {
+  if ($("modal").classList.contains("hidden")) {
+    modalTrigger = document.activeElement;
+    modalBackground = [...new Set([...document.body.children, $("main"), $("login")])].filter(e => !["modal","toast"].includes(e.id) && !["SCRIPT","STYLE"].includes(e.tagName))
+      .map(e => [e, e.inert, e.getAttribute("aria-hidden")]);
+    modalBackground.forEach(([e]) => { e.inert = true; e.setAttribute("aria-hidden", "true"); });
+  }
+  const body = $("modalBody");
+  $("modal").dataset.explicitCloseOnly = String(explicitCloseOnly);
+  body.innerHTML = html;
+  body.setAttribute("role", "dialog"); body.setAttribute("aria-modal", "true"); body.tabIndex = -1;
+  const title = body.querySelector("h3"), desc = body.querySelector(".sub");
+  if (title) title.id = "modalTitle";
+  if (desc) desc.id = "modalDescription";
+  body.setAttribute("aria-labelledby", "modalTitle");
+  if (desc) body.setAttribute("aria-describedby", "modalDescription"); else body.removeAttribute("aria-describedby");
+  $("modal").classList.remove("hidden");
+  (explicitCloseOnly ? body.querySelector(".grant-close") : modalControls()[0] || body).focus();
+}
+function closeModal() {
+  if ($("modal").classList.contains("hidden")) return;
+  $("modal").classList.add("hidden");
+  modalBackground.forEach(([e, inert, hidden]) => { e.inert = inert; if (hidden === null) e.removeAttribute("aria-hidden"); else e.setAttribute("aria-hidden", hidden); });
+  modalBackground = [];
+  const target = modalTrigger; modalTrigger = null;
+  if (target?.isConnected && !target.disabled && target !== document.body && target.getClientRects().length) target.focus();
+  else { const fallback = (!$("main").classList.contains("hidden") && document.querySelector('#main button:not([disabled])')) || $("email"); fallback?.focus(); }
+}
 function dismissModal() { if ($("modal").dataset.explicitCloseOnly !== "true") closeModal(); }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("modal").classList.contains("hidden")) dismissModal(); });
+$("modal").addEventListener("keydown", e => {
+  if ($("modal").classList.contains("hidden")) return;
+  if (e.key === "Escape") { e.preventDefault(); dismissModal(); }
+  if (e.key !== "Tab") return;
+  const controls = modalControls(), first = controls[0], last = controls.at(-1);
+  if (!first) { e.preventDefault(); $("modalBody").focus(); }
+  else if (e.shiftKey && (document.activeElement === first || !controls.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (document.activeElement === last || !controls.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
+});
 function grantModal(id) {
+  if (!requireFresh("core")) return;
   const u = users.find((x) => x.id === id); if (!u) return;
   const b = config.billing_info || {};
   const today = new Date().toISOString().slice(0, 10);
@@ -848,6 +951,7 @@ function grantModeChanged() {
   $("g_to_field").classList.toggle("hidden", !range);
 }
 async function doGrant(id) {
+  if (!requireFresh("core")) return;
   const range = document.querySelector('input[name="g_mode"]:checked').value === "range";
   const p = { p_user: id, p_quota_extra: Number($("g_extra").value) || 0,
               p_amount: Number($("g_amount").value) || 0, p_note: $("g_note").value || null, p_months: 0 };
@@ -861,9 +965,10 @@ async function doGrant(id) {
   }
   const qm = $("g_monthly").value; if (qm !== "") p.p_quota_monthly = Number(qm);
   try { const r = await rpc("admin_grant", p); closeModal(); toast(`완료: 만료일 ${r.active_until || "-"} · 남은 DB ${num(r.quota_left)}`); await reloadAll(); }
-  catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = e.message; }
+  catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = safeError(); }
 }
 function editModal(id) {
+  if (!requireFresh("core")) return;
   const u = users.find((x) => x.id === id); if (!u) return;
   openModal(`
     <h3>직접 수정 — ${esc(u.email)}</h3>
@@ -887,33 +992,45 @@ function editModal(id) {
     <div class="msg" id="mMsg"></div>`);
 }
 async function doEdit(id) {
+  if (!requireFresh("core")) return;
   const p = { p_user: id, p_name: $("e_name").value, p_deposit_name: $("e_deposit").value, p_active_until: $("e_until").value || null,
               p_quota_monthly: Number($("e_monthly").value), p_quota_used: Number($("e_used").value),
               p_quota_extra: Number($("e_extra").value), p_memo: $("e_memo").value, p_is_admin: $("e_admin").value === "true",
               p_contract_date: $("e_contract").value || null };
   try {
     await rpc("admin_update", p);
+    await reloadAll();
+    if (!requireFresh("core")) return;
     await rpc("admin_set_student", { p_user: id, p_student_code: $("e_code").value, p_contract_date: $("e_contract").value || null, p_clear_contract: !$("e_contract").value });
     closeModal(); toast("저장됨"); await reloadAll();
-  } catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = e.message; }
+  } catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = safeError(); }
 }
 async function doStop(id) {
+  if (!requireFresh("core")) return;
   if (!confirm("이 수강생의 이용을 정지할까요? (만료일이 지워져 크롤링을 못 합니다)")) return;
   try { await rpc("admin_update", { p_user: id, p_clear_until: true }); closeModal(); toast("정지됨"); await reloadAll(); }
-  catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = e.message; }
+  catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = safeError(); }
 }
 
 // ── 결제 기록 / 로그 ───────────────────────────────
 async function loadPayments() {
-  const r = await rpc("admin_payments", { p_limit: 200 });
-  const tb = $("payments").querySelector("tbody"); tb.innerHTML = "";
-  (r.payments || []).forEach((p) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc((p.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(p.email || "")}</td><td>${esc(p.name || "")}</td>
-      <td class="num">${won(p.amount)}</td><td class="num">${p.months || 0}</td><td class="num">${num(p.quota_added)}</td>
-      <td>${esc(p.method)}</td><td>${p.period_from || ""}${p.period_to ? " ~ " + p.period_to : ""}</td><td>${esc(p.note || "")}</td>`;
-    tb.appendChild(tr);
-  });
+  const state = datasetState("payments"), generation = ++state.generation;
+  state.status = "refreshing"; showDataStatus();
+  try {
+    const r = await rpc("admin_payments", { p_limit: 200 });
+    if (generation !== state.generation) return;
+    const tb = $("payments").querySelector("tbody"); tb.innerHTML = "";
+    (r.payments || []).forEach((p) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${esc((p.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(p.email || "")}</td><td>${esc(p.name || "")}</td>
+        <td class="num">${won(p.amount)}</td><td class="num">${p.months || 0}</td><td class="num">${num(p.quota_added)}</td>
+        <td>${esc(p.method)}</td><td>${p.period_from || ""}${p.period_to ? " ~ " + p.period_to : ""}</td><td>${esc(p.note || "")}</td>`;
+      tb.appendChild(tr);
+    });
+
+    if (generation === state.generation) { state.status = "fresh"; state.lastSuccess = new Date().toISOString(); }
+  } catch (e) { if (generation === state.generation) state.status = "stale"; }
+  finally { if (generation === state.generation) showDataStatus(); }
 }
 let activityRows = [];
 const ACT_KIND_KO = { crawl_collect: "1단계(목록 수집)", crawl_detail: "2단계(상세 수집)", coupang_upload: "쿠팡 업로드", coupang_review: "쿠팡 심사 결과", error_report: "🐞 문제 신고" };
@@ -923,10 +1040,15 @@ function actFailTally(a) {
   const items = Array.isArray((a.detail || {}).items) ? a.detail.items : [];
   const cnt = {};
   items.filter((x) => !x.ok).forEach((x) => {
-    const raw = String(x.error || "사유 없음").replace(/^미전송\s*[—-]\s*/, "");
-    raw.split(" / ").map((s) => s.trim().slice(0, 60)).filter(Boolean).forEach((s) => { cnt[s] = (cnt[s] || 0) + 1; });
+    const raw = String(x.error || "사유 없음");
+    const reasons = raw.length <= 200 ? raw.replace(/^미전송\s*[—-]\s*/, "").split(" / ") : [""];
+    reasons.map(s => safeActivityError(s.trim())).forEach(s => { cnt[s] = (cnt[s] || 0) + 1; });
   });
   return Object.entries(cnt).sort((p, q) => q[1] - p[1]);
+}
+function safeActivityError(value) {
+  const allowed = ["카테고리 없음", "대표이미지 없음", "상품명 없음", "가격 없음", "옵션 없음", "사유 없음"];
+  return allowed.includes(value) ? value : "처리 실패 — 연결 및 입력값을 확인하세요.";
 }
 function actDetailHtml(a) {
   const d = a.detail || {};
@@ -936,7 +1058,7 @@ function actDetailHtml(a) {
       <div style="padding:8px 10px;background:#fff1f1;border-radius:8px;white-space:pre-wrap;margin-bottom:6px"><b>학생이 적은 내용:</b> ${esc(d.message || "")}</div>
       <div class="muted">버전 ${esc(d.version || "-")} · ${esc(d.os || "")} · 기기 ${esc(d.device || "-")} · 이용권 ${st.is_active ? "유효" : "없음/만료"}${st.active_until ? ` (${esc(st.active_until)})` : ""} · 남은 크롤링 ${esc(String(st.quota_left ?? "-"))}${d.crawl_running ? " · 신고 당시 크롤링 진행 중" : ""}</div>
       <details style="margin-top:6px"><summary style="cursor:pointer">직전 작업 기록 ${(d.logs || []).length}줄</summary>
-        <pre style="white-space:pre-wrap;font-size:11px;max-height:260px;overflow:auto;margin:6px 0 0;background:#f7f5fb;padding:8px;border-radius:8px">${esc((d.logs || []).join("\n"))}</pre></details></div>`;
+        <pre style="white-space:pre-wrap;font-size:11px;max-height:260px;overflow:auto;margin:6px 0 0;background:#f7f5fb;padding:8px;border-radius:8px">${esc("진단 기록은 민감정보 보호를 위해 표시하지 않습니다.")}</pre></details></div>`;
   }
   const items = Array.isArray(d.items) ? d.items : [];
   const parts = [];
@@ -949,10 +1071,10 @@ function actDetailHtml(a) {
     if (tally.length) parts.push(`<div style="margin-bottom:6px;padding:6px 10px;background:#fff1f1;border-radius:8px"><b>실패 사유 집계:</b> ${tally.map(([k, n]) => `${esc(k)} <b>${n}</b>`).join(" · ")}</div>`);
     parts.push(`<div class="muted" style="margin-bottom:4px">상품 ${items.length}개 (성공 ${ok} · 실패 ${items.length - ok})</div>
       <div style="max-height:320px;overflow:auto"><table style="font-size:12px"><thead><tr><th style="width:28px">#</th><th>상품명</th>${a.kind !== "coupang_upload" ? "<th>URL</th>" : ""}<th style="width:60px">결과</th><th>오류</th></tr></thead><tbody>
-      ${items.map((x, i) => `<tr><td class="muted">${i + 1}</td><td>${esc(x.title || "(제목 없음)")}</td>${a.kind !== "coupang_upload" ? `<td>${safeHttp(x.url) ? `<a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer" style="word-break:break-all">${esc(x.url)}</a>` : esc(x.url || "")}</td>` : ""}<td>${x.status ? `<span class="tag ${x.ok ? "ok" : "err"}">${esc(x.status)}</span>` : x.ok ? `<span class="tag ok">성공</span>` : `<span class="tag err">실패</span>`}</td><td class="muted">${esc(x.error || x.reason || "")}${x.category_path ? ` <small>(${esc(x.category_path)}${x.category_source ? " · " + esc(x.category_source) : ""})</small>` : ""}${x.ok && x.seller_product_id && !x.status ? `등록상품ID ${esc(String(x.seller_product_id))}` : ""}</td></tr>`).join("")}
+      ${items.map((x, i) => `<tr><td class="muted">${i + 1}</td><td>${esc(x.title || "(제목 없음)")}</td>${a.kind !== "coupang_upload" ? `<td>${safeHttp(x.url) ? `<a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer" style="word-break:break-all">${esc(x.url)}</a>` : esc(x.url || "")}</td>` : ""}<td>${x.status ? `<span class="tag ${x.ok ? "ok" : "err"}">${esc(x.status)}</span>` : x.ok ? `<span class="tag ok">성공</span>` : `<span class="tag err">실패</span>`}</td><td class="muted">${esc(x.error || x.reason ? safeActivityError(x.error || x.reason) : "")}${x.category_path ? ` <small>(${esc(x.category_path)}${x.category_source ? " · " + esc(x.category_source) : ""})</small>` : ""}${x.ok && x.seller_product_id && !x.status ? `등록상품ID ${esc(String(x.seller_product_id))}` : ""}</td></tr>`).join("")}
       </tbody></table></div>`);
   }
-  if (!parts.length) parts.push(`<pre style="white-space:pre-wrap;font-size:11.5px;margin:0">${esc(JSON.stringify(d, null, 2))}</pre>`);
+  if (!parts.length) parts.push(`<pre style="white-space:pre-wrap;font-size:11.5px;margin:0">${esc("표시할 요약 정보가 없습니다.")}</pre>`);
   return `<div style="font-size:12.5px">${parts.join("")}</div>`;
 }
 let activityRequest = 0;
@@ -981,21 +1103,25 @@ async function loadActivityMore() {
   const button = $("actMore");
   if (button.disabled || button.hidden) return;
   const request = activityRequest;
+  const generation = beginDataset("activity");
   button.disabled = true;
   try {
     const user = $("actUser").value || null, priorRows = activityRows;
     const r = await activityPage(user, null, priorRows[priorRows.length - 1]);
     if (request !== activityRequest || priorRows !== activityRows || user !== ($("actUser").value || null)) return;
     activityRows.push(...(r.rows || []));
+    settleDataset("activity", generation, true);
     button.hidden = (r.rows || []).length < 300;
     renderActivity();
-  } catch (e) { toast("활동 로그 불러오기 실패: " + e.message); }
-  finally { button.disabled = false; }
+  } catch (e) { if (request === activityRequest) { settleDataset("activity", generation, false); toast(safeError()); } }
+  finally { if (request === activityRequest) button.disabled = false; }
 }
 async function loadActivity() {
   const request = ++activityRequest;
+  const generation = beginDataset("activity");
   const user = $("actUser").value || null;
   $("actMore").hidden = true;
+  $("actMore").disabled = false;
   if ($("actUser").options.length <= 1) {
     $("actUser").innerHTML = `<option value="">전체 수강생</option>` +
       (users || []).filter((u) => !u.is_admin)
@@ -1005,9 +1131,10 @@ async function loadActivity() {
     const r = await activityPage(user, null, null);
     if (request !== activityRequest || user !== ($("actUser").value || null)) return;
     activityRows = r.rows || [];
+    settleDataset("activity", generation, true);
     $("actMore").hidden = activityRows.length < 300;
     renderActivity();
-  } catch (e) { toast("활동 로그 불러오기 실패: " + e.message); }
+  } catch (e) { if (request !== activityRequest) return; settleDataset("activity", generation, false); toast(safeError()); }
 }
 function newestActivityTimestamp(rows) {
   return rows.map(a => a.created_at).filter(Boolean).sort().pop() || "기록 없음";
@@ -1071,6 +1198,7 @@ async function coupangActivityAllPages(since) {
 }
 async function loadCoupangStats() {
   const request = ++cpsRequest;
+  const generation = beginDataset("coupang");
   $("cpsNote").textContent = "불러오는 중…";
   try {
     const selected = Number($("cpsWeeks").value);
@@ -1078,10 +1206,12 @@ async function loadCoupangStats() {
     const r = await coupangActivityAllPages(new Date(Date.now() - weeks * 7 * 86400000).toISOString());
     if (request !== cpsRequest) return;
     cpsRows = r.rows || [];
+    settleDataset("coupang", generation, true);
     renderCoupangStats();
   } catch (e) {
     if (request !== cpsRequest) return;
-    $("cpsNote").textContent = "실패: " + e.message;
+    settleDataset("coupang", generation, false);
+    $("cpsNote").textContent = safeError();
   }
 }
 function cpsApprovedCats() {
@@ -1109,7 +1239,7 @@ function renderCoupangStats() {
       const day = String(a.created_at || "").slice(0, 10); const db = (byDay[day] = byDay[day] || { tried: 0, ok: 0, fail: {} });
       items.forEach((x) => { b.tried++; tried++; db.tried++; if (x.ok) { b.ok++; okUp++; db.ok++; } else actFailTally({ detail: { items: [x] } }).forEach(([k]) => { fail[k] = (fail[k] || 0) + 1; db.fail[k] = (db.fail[k] || 0) + 1; }); });
     } else {
-      items.forEach((x) => { b.finals++; finals++; if (x.ok) { b.approved++; approved++; } else { const k = String(x.reason || "사유 없음").slice(0, 80); reject[k] = (reject[k] || 0) + 1; } });
+      items.forEach((x) => { b.finals++; finals++; if (x.ok) { b.approved++; approved++; } else { const k = safeActivityError(x.reason || "사유 없음"); reject[k] = (reject[k] || 0) + 1; } });
     }
   });
   const pct = (a, b) => b ? Math.round(a / b * 100) + "%" : "-";
@@ -1133,6 +1263,7 @@ function renderCoupangStats() {
   $("cpsNote").textContent = `${rows.length}건 집계 (최근 ${weeks}주)` + (Object.keys(cats).length ? ` · 승인으로 확인된 EMP 카테고리 ${Object.keys(cats).length}개` : "");
 }
 async function cpsLearnApproved() {
+  if (!requireFresh("core", "coupang")) return;
   const cats = cpsApprovedCats(); const today = new Date().toISOString().slice(0, 10);
   const merged = { ...(config.coupang_cat_overrides || {}) }; let n = 0;
   Object.entries(cats).forEach(([emp, c]) => { if (!merged[emp] || String(merged[emp].code) !== String(c.code)) { merged[emp] = { ...(merged[emp] || {}), code: c.code, path: c.path, n: c.n, at: today, from: "approved" }; n++; } });
@@ -1144,10 +1275,16 @@ async function cpsLearnApproved() {
 // ── 주별 활동 추이 ──
 let trendData = null;
 async function loadActivityTrend() {
+  const state = datasetState("trend"), generation = ++state.generation;
+  state.status = "refreshing"; showDataStatus();
   try {
-    trendData = await rpc("admin_activity_trend", { p_weeks: Number($("trendWeeks").value) || 8 });
-    renderActivityTrend();
-  } catch (e) { toast("활동 추이 불러오기 실패: " + e.message); }
+    const value = await rpc("admin_activity_trend", { p_weeks: Number($("trendWeeks").value) || 8 });
+    if (generation !== state.generation) return;
+    trendData = value; renderActivityTrend();
+
+    if (generation === state.generation) { state.status = "fresh"; state.lastSuccess = new Date().toISOString(); }
+  } catch (e) { if (generation === state.generation) state.status = "stale"; }
+  finally { if (generation === state.generation) showDataStatus(); }
 }
 function renderActivityTrend() {
   if (!trendData) return;
@@ -1210,13 +1347,21 @@ async function copyExpireAll() {
   try { await navigator.clipboard.writeText(list.map(expireText).join("\n\n────────\n\n")); toast(`${list.length}명 문구 복사됨`); } catch { toast("복사 실패"); }
 }
 async function loadLog() {
-  const r = await rpc("admin_log_recent", { p_limit: 200 });
-  const tb = $("log").querySelector("tbody"); tb.innerHTML = "";
-  (r.log || []).forEach((l) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc((l.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(l.action)}</td><td>${esc(l.target_email || "")}</td><td><small>${esc(JSON.stringify(l.detail))}</small></td>`;
-    tb.appendChild(tr);
-  });
+  const state = datasetState("log"), generation = ++state.generation;
+  state.status = "refreshing"; showDataStatus();
+  try {
+    const r = await rpc("admin_log_recent", { p_limit: 200 });
+    if (generation !== state.generation) return;
+    const tb = $("log").querySelector("tbody"); tb.innerHTML = "";
+    (r.log || []).forEach((l) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${esc((l.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(l.action)}</td><td>${esc(l.target_email || "")}</td><td><small>${esc(JSON.stringify(l.detail))}</small></td>`;
+      tb.appendChild(tr);
+    });
+
+    if (generation === state.generation) { state.status = "fresh"; state.lastSuccess = new Date().toISOString(); }
+  } catch (e) { if (generation === state.generation) state.status = "stale"; }
+  finally { if (generation === state.generation) showDataStatus(); }
 }
 
 // ── 리베이트 정산 ───────────────────────────────────
@@ -1240,7 +1385,8 @@ function rbMonthShift(d) {
   sel.selectedIndex = i; renderRebate();
 }
 async function loadRebate() {
-  rbData = await rpc("admin_rebates");
+  await reloadAll();
+  if (!requireFresh("core")) return;
   const sel = $("rbMonth"), keep = sel.value;
   const months = []; for (let i = 0; i < 14; i++) months.push(ymAdd(ymNow(), -i));
   sel.innerHTML = months.map((m) => `<option value="${m}">${m} 지급 (기준 ${ymAdd(m, -3)})</option>`).join("");
@@ -1251,6 +1397,7 @@ async function loadRebate() {
   $("cfg_rb_rate").value = c.rate; $("cfg_rb_vat").value = c.vat; $("cfg_rb_due").value = c.due_day; $("cfg_rb_late").value = c.late_rate; $("cfg_rb_start").value = c.start_month || "";
   renderRebate(); renderRefund(); renderAnnual();
 }
+
 const rbTargets = () => rbData.students.filter((s) => !s.rebate_admin_excluded);
 function rbRowsFor(pm) {
   const rows = (rbData.rows || []).filter((r) => r.pay_month === pm);
@@ -1373,13 +1520,14 @@ async function openStorage(path) {
     const { data, error } = await sb.storage.from("rebate-files").createSignedUrl(path, 600);
     if (error) throw error;
     window.open(data.signedUrl, "_blank");
-  } catch (e) { toast("파일 열기 실패: " + e.message); }
+  } catch (e) { toast("파일 열기 실패: " + safeError()); }
 }
 document.addEventListener("click", (e) => {
   const a = e.target.closest(".js-open-storage");
   if (a) { e.preventDefault(); openStorage(a.dataset.path); }
 });
 function confirmModal(id) {
+  if (!requireFresh("core")) return;
   const r = (rbData.rows || []).find((x) => x.id === id); if (!r) return;
   const s = rbData.students.find((x) => x.id === r.user_id) || {};
   openModal(`
@@ -1394,14 +1542,16 @@ function confirmModal(id) {
     <div class="msg" id="mMsg"></div>`);
 }
 async function doConfirm(id) {
+  if (!requireFresh("core")) return;
   try {
     await rpc("admin_rebate_confirm", { p_id: id, p_amount: Number($("c_amount").value) || 0, p_paid_at: $("c_date").value, p_memo: $("c_memo").value || null });
     closeModal(); toast("입금 확인됨"); await loadRebate();
-  } catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = e.message; }
+  } catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = safeError(); }
 }
 async function unconfirmRebate(id) {
+  if (!requireFresh("core")) return;
   if (!confirm("입금 확인을 취소할까요? (수강생이 다시 수정할 수 있게 됩니다)")) return;
-  try { await rpc("admin_rebate_unconfirm", { p_id: id }); toast("취소됨"); await loadRebate(); } catch (e) { toast("실패: " + e.message); }
+  try { await rpc("admin_rebate_unconfirm", { p_id: id }); toast("취소됨"); await loadRebate(); } catch (e) { toast("실패: " + safeError()); }
 }
 function remindText(s, pm) {
   const r = (rbData.rows || []).find((x) => x.pay_month === pm && x.user_id === s.id);
@@ -1438,6 +1588,7 @@ function rbExportCsv() {
   a.download = `리베이트_${pm}.csv`; a.click(); URL.revokeObjectURL(a.href);
 }
 function studentModal(uid) {
+  if (!requireFresh("core")) return;
   const s = rbData.students.find((x) => x.id === uid); if (!s) return;
   const rows = (rbData.rows || []).filter((r) => r.user_id === uid).sort((a, b) => b.pay_month.localeCompare(a.pay_month));
   const docs = (rbData.docs || []).filter((d) => d.user_id === uid);
@@ -1467,11 +1618,12 @@ function studentModal(uid) {
     <div class="msg" id="mMsg"></div>`);
 }
 async function saveStudent(uid) {
+  if (!requireFresh("core")) return;
   try {
     await rpc("admin_set_student", { p_user: uid, p_student_code: $("s_code").value, p_contract_date: $("s_contract").value || null,
       p_clear_contract: !$("s_contract").value, p_rebate_excluded: $("s_rebate_excluded").checked });
     closeModal(); toast("저장됨"); await loadRebate(); await reloadAll();
-  } catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = e.message; }
+  } catch (e) { $("mMsg").className = "msg err"; $("mMsg").textContent = safeError(); }
 }
 function renderRefund() {
   const tb = $("rbRefund").querySelector("tbody"); tb.innerHTML = "";
@@ -1517,11 +1669,12 @@ function renderAnnual() {
   });
 }
 async function saveAnnual(uid, year) {
+  if (!requireFresh("core")) return;
   const v = $("an_vat_" + uid).value, i = $("an_inc_" + uid).value;
   try {
     await rpc("admin_rebate_annual_set", { p_user: uid, p_year: year, p_vat_net: v === "" ? null : Number(v), p_income_tax: i === "" ? null : Number(i), p_memo: $("an_memo_" + uid).value || null });
-    toast("저장됨"); rbData = await rpc("admin_rebates"); renderAnnual();
-  } catch (e) { toast("실패: " + e.message); }
+    toast("저장됨"); await loadRebate();
+  } catch (e) { toast("실패: " + safeError()); }
 }
 function saveRebateCfg() {
   setConfig("rebate", { rate: Number($("cfg_rb_rate").value) || 0.03, vat: Number($("cfg_rb_vat").value) || 0, due_day: Number($("cfg_rb_due").value) || 5, late_rate: Number($("cfg_rb_late").value) || 0,
@@ -1550,8 +1703,9 @@ function saveBanned() {
   setConfig("banned_words", v, `추가 금지어 (어린이용품 +${v["어린이용품"].length}개 · 지재권 +${v["지재권"].length}개)`);
 }
 async function setConfig(key, value, label) {
-  try { await rpc("admin_set_config", { p_key: key, p_value: value }); config[key] = value; toast(`${label} 저장됨`); }
-  catch (e) { toast("저장 실패: " + e.message); }
+  if (!requireFresh("core")) return;
+  try { await rpc("admin_set_config", { p_key: key, p_value: value }); config[key] = value; toast(`${label} 저장됨`); await reloadAll(); }
+  catch (e) { toast("저장 실패: " + safeError()); }
 }
 // coupang_api: true / coupang_direct: false 는 아직 옛 버전(≤0.1.18) 앱을 쓰는 수강생을 위해 같이 저장 (새 버전은 이 두 키를 안 봄)
 function saveFeatures() { setConfig("features", { ...(config.features || {}), coupang_auto_request: $("cfg_feat_cpreq").checked, coupang_api: true, coupang_direct: false }, "기능 스위치"); }
@@ -1620,9 +1774,10 @@ async function cpLearnRun() {
     });
     $("cpl_preview").hidden = !cplResult.length;
     msg.textContent = `윙 상품 ${wingProducts}개 중 이름이 일치한 ${matched}개 → EMP 코드 ${cplResult.length}개 학습 가능` + (matched < wingProducts ? " (이름이 안 맞는 건 다른 크롤링 결과 파일일 수 있음 — ②에 그 파일도 같이 고르세요)" : "");
-  } catch (e) { msg.textContent = "실패: " + e.message; }
+  } catch (e) { msg.textContent = "실패: " + safeError(); }
 }
 async function cpLearnSave() {
+  if (!requireFresh("core")) return;
   if (!cplResult.length) return;
   const today = new Date().toISOString().slice(0, 10);
   const merged = { ...(config.coupang_cat_overrides || {}) };
@@ -1631,6 +1786,7 @@ async function cpLearnSave() {
   $("cpl_count").textContent = Object.keys(merged).length + "개";
 }
 async function cpLearnClear() {
+  if (!requireFresh("core")) return;
   if (!confirm("학습된 EMP→쿠팡 카테고리 매핑을 전부 지울까요? (앱은 다시 이름 예측으로 돌아갑니다)")) return;
   await setConfig("coupang_cat_overrides", {}, "쿠팡 카테고리 학습 초기화");
   $("cpl_count").textContent = "0개";
@@ -1661,7 +1817,7 @@ function saveLedgerSheet() {
 }
 function saveRate() { setConfig("rate_limit", { per_minute: Number($("cfg_rl_min").value) || 30, per_hour: Number($("cfg_rl_hour").value) || 1200 }, "속도 제한"); }
 function saveRules() {
-  let v; try { v = JSON.parse($("cfg_rules").value); } catch (e) { $("rulesMsg").className = "msg err"; $("rulesMsg").textContent = "JSON 형식 오류: " + e.message; return; }
+  let v; try { v = JSON.parse($("cfg_rules").value); } catch (e) { $("rulesMsg").className = "msg err"; $("rulesMsg").textContent = "JSON 형식 오류: " + safeError(); return; }
   $("rulesMsg").textContent = ""; setConfig("crawler_rules", v, "파싱 규칙");
 }
 
@@ -1671,11 +1827,11 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   document.querySelectorAll(".page").forEach((x) => x.classList.remove("active"));
   b.classList.add("active"); $("page-" + b.dataset.page).classList.add("active");
   try { localStorage.setItem("adm_tab", b.dataset.page); } catch {}
-  if (b.dataset.page === "payments") loadPayments().catch((e) => toast(e.message));
-  if (b.dataset.page === "rebate") loadRebate().catch((e) => toast("리베이트 불러오기 실패: " + e.message));
+  if (b.dataset.page === "payments") loadPayments().catch((e) => toast(safeError()));
+  if (b.dataset.page === "rebate") loadRebate().catch((e) => toast("리베이트 불러오기 실패: " + safeError()));
   if (b.dataset.page === "sales") renderSales();
-  if (b.dataset.page === "activity") { loadActivity().catch((e) => toast(e.message)); loadActivityTrend().catch((e) => toast(e.message)); loadCoupangStats().catch((e) => toast(e.message)); }
-  if (b.dataset.page === "log") loadLog().catch((e) => toast(e.message));
+  if (b.dataset.page === "activity") { loadActivity().catch((e) => toast(safeError())); loadActivityTrend().catch((e) => toast(safeError())); loadCoupangStats().catch((e) => toast(safeError())); }
+  if (b.dataset.page === "log") loadLog().catch((e) => toast(safeError()));
 }));
 $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
 </script>
