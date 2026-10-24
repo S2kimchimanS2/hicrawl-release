@@ -494,10 +494,11 @@ async function doLogin() {
     const { data, error } = await sb.auth.signInWithPassword({ email: $("email").value.trim(), password: $("password").value });
     if (error) throw error;
     me = data.user;
-    const st = await rpc("get_status");
-    if (!st.is_admin) throw new Error("이 계정은 관리자가 아닙니다. SQL Editor 에서 is_admin 을 켜주세요.");
+    // This admin-only read authorizes access without a desktop device session.
+    const stats = await rpc("admin_stats");
+    if (stats === null || typeof stats !== "object" || stats.ok !== true) throw new Error(safeError());
     try { localStorage.setItem("sb_url", url); localStorage.setItem("sb_key", key); localStorage.setItem("sb_email", $("email").value.trim()); } catch {}
-    $("who").textContent = st.email;
+    $("who").textContent = me.email;
     $("login").classList.add("hidden"); $("main").classList.remove("hidden");
     msg.textContent = "";
     await reloadAll();
