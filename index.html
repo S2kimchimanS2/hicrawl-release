@@ -143,13 +143,13 @@
           <small class="muted" id="usersCount"></small>
           <span class="sp" style="flex:1"></span>
           <small class="muted">개월 연장은 "만료일이 남았으면 그 뒤에 이어서, 지났으면 오늘부터" 계산됩니다. DB는 월한도(매월 1일 리셋) + 추가분(리셋 없음).<br>
-            계정당 기기(MAC) 1대만 허용 — 처음 로그인한 PC에 자동 등록되고, 다른 PC로 로그인하면 막힙니다(계정 공유 방지). PC를 바꾸거나 포맷했으면 [기기 초기화] 누르면 됨. IP는 참고용(공유기·이동통신망 등으로 바뀔 수 있어 차단 기준 아님).</small>
+            PC 변경·사용 대수 제한은 없습니다. 일반 계정은 동시에 한 PC에서만 앱을 사용합니다. 이전 PC에서 작업 중이면 새 로그인이 거절되고, 작업이 없으면 새 로그인이 이전 세션을 종료합니다. 기기·IP 기록은 참고용이며 접속 제한 기준이 아닙니다.</small>
         </div>
         <div class="tbl-wrap">
           <table id="users">
             <thead><tr>
               <th data-k="email">이메일</th><th data-k="name">이름</th><th data-k="deposit">입금자명</th><th data-k="status">상태</th><th data-k="until">만료일</th><th class="num" data-k="monthly">월 DB</th><th class="num" data-k="used">이번달 사용</th><th class="num" data-k="extra">추가분</th><th class="num" data-k="left">남은 DB</th>
-              <th data-k="lease">최근 사용</th><th data-k="pay">최근 결제</th><th>메모</th><th data-k="profile">내정보</th><th data-k="rebate">리베이트(이번 달)</th><th>앱 버전</th><th>바인딩된 기기(MAC)</th><th>최근 접속 IP</th><th></th>
+              <th data-k="lease">최근 사용</th><th data-k="pay">최근 결제</th><th>메모</th><th data-k="profile">내정보</th><th data-k="rebate">리베이트(이번 달)</th><th>앱 버전</th><th>이전 기기 기록(참고)</th><th>최근 접속 IP</th><th></th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -478,7 +478,7 @@ async function rpc(name, params = {}) {
   if (mutation && !requireFresh("core")) throw Error("stale");
   if (mutation) { mutationPending = true; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
   try {
-    const { data, error } = await sb.rpc(name, params);
+    const { data, error } = await sb.rpc("application_session_call", { p_name: name, p_args: params, p_proof: sb.applicationProof });
     if (error || (data && data.ok === false)) throw new Error(safeError());
     return data;
   } finally {
@@ -494,13 +494,20 @@ async function doLogin() {
     const { data, error } = await sb.auth.signInWithPassword({ email: $("email").value.trim(), password: $("password").value });
     if (error) throw error;
     me = data.user;
-    // This admin-only read authorizes access without a desktop device session.
+    // Role bypass is decided only by the server; proof stays in memory.
+    const started = await sb.rpc("application_session_start", { p_device: "admin-web", p_version: "0.1.63" });
+    if (started.error || started.data?.ok !== true || typeof started.data.session_proof !== "string") throw new Error(safeError());
+    sb.applicationProof = started.data.session_proof;
     const stats = await rpc("admin_stats");
     if (stats === null || typeof stats !== "object" || stats.ok !== true) throw new Error(safeError());
     try { localStorage.setItem("sb_url", url); localStorage.setItem("sb_key", key); localStorage.setItem("sb_email", $("email").value.trim()); } catch {}
     $("who").textContent = me.email;
     $("login").classList.add("hidden"); $("main").classList.remove("hidden");
     msg.textContent = "";
+    if (sb.applicationHeartbeat) clearInterval(sb.applicationHeartbeat);
+    sb.applicationHeartbeat = setInterval(async () => {
+      try { await sb.rpc("application_session_control", { p_action: "heartbeat", p_proof: sb.applicationProof }); } catch {}
+    }, 25000);
     await reloadAll();
     try { const t = localStorage.getItem("adm_tab"); if (t && t !== "users") gotoTab(t); } catch {}
   } catch (e) { msg.className = "msg err"; msg.textContent = safeError(); }
@@ -716,13 +723,13 @@ function renderUsers() {
       <td>${rbData && !u.is_admin ? `<a href="#" onclick="studentModal('${u.id}');return false" style="text-decoration:none">${profileCell(u)}</a>` : profileCell(u)}</td>
       <td>${rebateCell(u)}</td>
       <td>${versionCell(u)}</td>
-      <td>${u.bound_mac ? `<span class="tag ok">${esc(u.bound_mac)}</span>` : `<span class="tag muted">미등록</span>`}</td>
+      <td>${u.bound_mac ? `<span class="tag ok">${esc(u.bound_mac)}</span>` : `<span class="tag muted">기록 없음</span>`}</td>
       <td>${esc(u.bound_ip || "-")}</td>
       <td class="row" style="flex-wrap:nowrap">
         <button class="btn sm" onclick="grantModal('${u.id}')">이용권 부여</button>
         ${!u.is_admin && (u.days_left === null || u.days_left === undefined || u.days_left <= 7) ? `<button class="btn sm ghost" onclick="copyExpire('${u.id}')" title="입금 안내 카톡 문구 복사">💬 문구</button>` : ""}
         <button class="btn sm ghost" onclick="editModal('${u.id}')">수정</button>
-        ${u.bound_mac ? `<button class="btn sm warn" onclick="resetDevice('${u.id}')">기기 초기화</button>` : ""}
+        <button class="btn sm warn" onclick="resetDevice('${u.id}')">세션 종료</button>
       </td>`;
     tb.appendChild(tr);
   });
@@ -753,8 +760,8 @@ function versionCell(u) {
 async function resetDevice(id) {
   if (!requireFresh("core")) return;
   const u = users.find((x) => x.id === id); if (!u) return;
-  if (!confirm(`${u.email} 의 기기 등록을 초기화할까요?\n다음 로그인하는 PC로 새로 등록됩니다 (PC 교체·포맷 시 사용).`)) return;
-  try { await rpc("admin_reset_device", { p_user: id }); toast("기기 초기화됨"); await reloadAll(); }
+  if (!confirm(`${u.email} 의 활성 앱 세션을 종료할까요?\n진행 중인 작업이 중단될 수 있으며, 다시 로그인해야 합니다.`)) return;
+  try { await rpc("admin_reset_device", { p_user: id }); toast("앱 세션을 종료했습니다"); await reloadAll(); }
   catch (e) { toast("실패: " + safeError()); }
 }
 
