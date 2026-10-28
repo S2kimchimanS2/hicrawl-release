@@ -126,6 +126,7 @@
       <button data-page="config">⚙️ 앱 설정 배포</button>
       <button data-page="activity">📦 수강생 활동</button>
       <button data-page="log">🗒 작업 로그</button>
+      <button data-page="incidents">클라이언트 사고 (읽기 전용)</button>
     </div>
 
     <!-- 수강생 -->
@@ -400,6 +401,23 @@
       </div>
     </div>
 
+    <div class="page" id="page-incidents">
+      <div class="card">
+        <h2>클라이언트 사고 — 읽기 전용</h2>
+        <div class="row">
+          <input id="incidentUser" placeholder="사용자 이메일 / UUID">
+          <input id="incidentVersion" placeholder="앱 버전">
+          <input id="incidentCategory" placeholder="category">
+          <input id="incidentStage" placeholder="stage">
+          <label>시작 (ISO 시간)<input id="incidentSince" placeholder="2026-10-28T00:00:00Z"></label>
+          <label>종료 (ISO 시간)<input id="incidentUntil" placeholder="2026-10-29T00:00:00Z"></label>
+          <button class="btn" onclick="loadIncidents(false)">조회 / 첫 페이지</button>
+          <button class="btn ghost" id="incidentNext" disabled onclick="loadIncidents(true)">다음 페이지</button>
+        </div>
+        <p id="incidentStatus" class="muted">필터를 입력하고 조회하세요. 페이지당 최대 100건.</p>
+        <div id="incidentRows"></div>
+      </div>
+    </div>
     <div class="page" id="page-log">
       <div class="card">
         <h2>관리자 작업 로그</h2>
@@ -431,6 +449,52 @@ const dataStates = new Map();
 let mutationPending = false;
 const staleReason = "최신 데이터를 확인할 수 없습니다. 새로고침 성공 후 다시 시도하세요.";
 const safeError = () => "요청 실패: 연결과 권한을 확인하고 다시 시도하세요.";
+let incidentCursor = null, incidentFilters = null, incidentGeneration = 0;
+function incidentQuery() {
+  const query = {p_limit:100};
+  for (const [id, key] of [["incidentUser","p_user"],["incidentVersion","p_app_version"],["incidentCategory","p_category"],["incidentStage","p_stage"],["incidentSince","p_since"],["incidentUntil","p_until"]]) {
+    query[key] = $(id).value.trim() || null;
+  }
+  for (const key of ["p_since", "p_until"]) {
+    if (query[key] && (!/(Z|[+-]\d\d:\d\d)$/.test(query[key]) || !Number.isFinite(Date.parse(query[key])))) throw Error("invalid time");
+  }
+  return query;
+}
+function renderIncidentRows(items) {
+  const fields = ["id","user_id","email","incident_key","app_version","device_id","category","stage","lifecycle","outcome","reason","item_position","detected_at","structure_fingerprint"];
+  const text = value => typeof value === "string" ? value.slice(0, 512) : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  return items.slice(0,100).map(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+    const rows = fields.map(key => `<dt>${key}</dt><dd>${esc(text(item[key]))}</dd>`).join("");
+    const counts = ["completed","failed","total"].map(key => `${key}: ${text(item.counts?.[key])}`).join(" / ");
+    const tail = Array.isArray(item.log_tail) ? item.log_tail.slice(-20).filter(line => typeof line === "string").map(line => esc(line.slice(0,512))).join("\n") : "";
+    return `<article class="card"><dl>${rows}<dt>counts</dt><dd>${esc(counts)}</dd><dt>log_tail</dt><dd><pre>${tail}</pre></dd></dl></article>`;
+  }).join("");
+}
+async function loadIncidents(next) {
+  const generation = ++incidentGeneration;
+  $("incidentNext").disabled = true;
+  $("incidentRows").innerHTML = "";
+  $("incidentStatus").textContent = "조회 중…";
+  try {
+    const filters = incidentQuery();
+    if (next && (!incidentCursor || JSON.stringify(filters) !== JSON.stringify(incidentFilters))) throw Error("changed filters");
+    const cursor = next ? incidentCursor : null;
+    incidentCursor = null;
+    const {data, error} = await sb.rpc("read_client_incidents", {...filters,p_before_at:cursor?.before_at || null,p_before_id:cursor?.before_id || null});
+    if (generation !== incidentGeneration) return;
+    if (error || !data || !Array.isArray(data.items)) throw Error("invalid response");
+    incidentFilters = filters;
+    if (typeof data.next_cursor?.before_at === "string" && typeof data.next_cursor?.before_id === "string") incidentCursor = {before_at:data.next_cursor.before_at,before_id:data.next_cursor.before_id};
+    $("incidentRows").innerHTML = renderIncidentRows(data.items);
+    $("incidentStatus").textContent = `${Math.min(data.items.length,100)}건 (읽기 전용)`;
+    $("incidentNext").disabled = !incidentCursor;
+  } catch {
+    if (generation !== incidentGeneration) return;
+    incidentCursor = null;
+    $("incidentStatus").textContent = "조회 실패: 권한, ISO 시간과 필터를 확인하세요. 첫 페이지부터 다시 조회하세요.";
+  }
+}
 function datasetState(key) {
   if (!dataStates.has(key)) dataStates.set(key, {generation:0, status:"absent", lastSuccess:null});
   return dataStates.get(key);
