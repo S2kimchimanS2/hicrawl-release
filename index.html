@@ -409,13 +409,17 @@
           <input id="incidentVersion" placeholder="앱 버전">
           <input id="incidentCategory" placeholder="category">
           <input id="incidentStage" placeholder="stage">
+          <input id="incidentOperation" placeholder="operation">
+          <input id="incidentErrorCode" placeholder="error code">
+          <select id="incidentSeverity"><option value="">전체 심각도</option><option>error</option><option>critical</option></select>
+          <select id="incidentLifecycle"><option value="">전체 상태 / lifecycle</option><option>terminal</option><option>item_failed</option></select>
           <label>시작 (ISO 시간)<input id="incidentSince" placeholder="2026-10-28T00:00:00Z"></label>
           <label>종료 (ISO 시간)<input id="incidentUntil" placeholder="2026-10-29T00:00:00Z"></label>
           <button class="btn" onclick="loadIncidents(false)">조회 / 첫 페이지</button>
           <button class="btn ghost" id="incidentNext" disabled onclick="loadIncidents(true)">다음 페이지</button>
         </div>
         <p id="incidentStatus" class="muted">필터를 입력하고 조회하세요. 페이지당 최대 100건.</p>
-        <div id="incidentRows"></div>
+        <p id="incidentOverview" class="muted"></p><div id="incidentRows" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:12px"></div>
       </div>
     </div>
     <div class="page" id="page-log">
@@ -452,7 +456,7 @@ const safeError = () => "요청 실패: 연결과 권한을 확인하고 다시 
 let incidentCursor = null, incidentFilters = null, incidentGeneration = 0;
 function incidentQuery() {
   const query = {p_limit:100};
-  for (const [id, key] of [["incidentUser","p_user"],["incidentVersion","p_app_version"],["incidentCategory","p_category"],["incidentStage","p_stage"],["incidentSince","p_since"],["incidentUntil","p_until"]]) {
+  for (const [id, key] of [["incidentUser","p_user"],["incidentVersion","p_app_version"],["incidentCategory","p_category"],["incidentStage","p_stage"],["incidentOperation","p_operation"],["incidentErrorCode","p_error_code"],["incidentSeverity","p_severity"],["incidentLifecycle","p_lifecycle"],["incidentSince","p_since"],["incidentUntil","p_until"]]) {
     query[key] = $(id).value.trim() || null;
   }
   for (const key of ["p_since", "p_until"]) {
@@ -461,39 +465,75 @@ function incidentQuery() {
   return query;
 }
 function renderIncidentRows(items) {
-  const fields = ["id","user_id","email","incident_key","app_version","device_id","category","stage","lifecycle","outcome","reason","item_position","detected_at","structure_fingerprint"];
+  const fields = ["id","user_id","email","incident_key","app_version","device_id","category","stage","lifecycle","outcome","reason","item_position","detected_at","structure_fingerprint","schema_version","operation","error_code","severity","exception_class","run_id","job_id","item_id"];
   const text = value => typeof value === "string" ? value.slice(0, 512) : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
   return items.slice(0,100).map(item => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return "";
     const rows = fields.map(key => `<dt>${key}</dt><dd>${esc(text(item[key]))}</dd>`).join("");
     const counts = ["completed","failed","total"].map(key => `${key}: ${text(item.counts?.[key])}`).join(" / ");
     const tail = Array.isArray(item.log_tail) ? item.log_tail.slice(-20).filter(line => typeof line === "string").map(line => esc(line.slice(0,512))).join("\n") : "";
-    return `<article class="card"><dl>${rows}<dt>counts</dt><dd>${esc(counts)}</dd><dt>log_tail</dt><dd><pre>${tail}</pre></dd></dl></article>`;
+    return `<article class="card"><b>${esc(text(item.detected_at))} · ${esc(text(item.email || item.user_id))}</b><p>${esc(text(item.operation || item.category))} / ${esc(text(item.error_code || item.reason))} · ${esc(text(item.lifecycle))} · ${esc(text(item.severity || "error"))} · ${esc(text(item.stage))}</p><details><summary>안전 진단 상세</summary><dl>${rows}<dt>counts</dt><dd>${esc(counts)}</dd><dt>log_tail</dt><dd><pre>${tail}</pre></dd><dt>transitions</dt><dd>${esc(Array.isArray(item.transitions) ? item.transitions.slice(0,8).map(text).join(" → ") : "")}</dd></dl></details><button class="btn ghost" data-incident-copy="${esc(text(item.id))}">안전 진단 복사</button></article>`;
   }).join("");
 }
 async function loadIncidents(next) {
   const generation = ++incidentGeneration;
   $("incidentNext").disabled = true;
   $("incidentRows").innerHTML = "";
+  incidentSafeRows = [];
+  $("incidentOverview").textContent = "";
   $("incidentStatus").textContent = "조회 중…";
   try {
     const filters = incidentQuery();
     if (next && (!incidentCursor || JSON.stringify(filters) !== JSON.stringify(incidentFilters))) throw Error("changed filters");
     const cursor = next ? incidentCursor : null;
     incidentCursor = null;
-    const {data, error} = await sb.rpc("read_client_incidents", {...filters,p_before_at:cursor?.before_at || null,p_before_id:cursor?.before_id || null});
+    const {data, error} = await sb.rpc("read_client_incident_inbox", {...filters,p_before_at:cursor?.before_at || null,p_before_id:cursor?.before_id || null});
     if (generation !== incidentGeneration) return;
     if (error || !data || !Array.isArray(data.items)) throw Error("invalid response");
     incidentFilters = filters;
     if (typeof data.next_cursor?.before_at === "string" && typeof data.next_cursor?.before_id === "string") incidentCursor = {before_at:data.next_cursor.before_at,before_id:data.next_cursor.before_id};
     $("incidentRows").innerHTML = renderIncidentRows(data.items);
-    $("incidentStatus").textContent = `${Math.min(data.items.length,100)}건 (읽기 전용)`;
+    incidentSafeRows = data.items.slice(0,100);
+    const today = new Date().toISOString().slice(0,10);
+    $("incidentOverview").textContent = `현재 페이지: ${incidentSafeRows.length}건 · critical ${incidentSafeRows.filter(x=>x.severity==="critical").length} · 오늘 ${incidentSafeRows.filter(x=>String(x.detected_at).slice(0,10)===today).length} · 학생 ${new Set(incidentSafeRows.map(x=>x.user_id)).size}명 (상태 변경 없는 진단 기록)`;
+    $("incidentStatus").textContent = `${data.items.length ? Math.min(data.items.length,100)+"건 (읽기 전용)" : "조건에 맞는 사고가 없습니다."} · 갱신 ${new Date().toLocaleString()}`;
     $("incidentNext").disabled = !incidentCursor;
   } catch {
     if (generation !== incidentGeneration) return;
     incidentCursor = null;
     $("incidentStatus").textContent = "조회 실패: 권한, ISO 시간과 필터를 확인하세요. 첫 페이지부터 다시 조회하세요.";
   }
+}
+let incidentSafeRows = [];
+$("incidentRows").addEventListener("click", async event => {
+  const id = event.target.closest("[data-incident-copy]")?.dataset.incidentCopy;
+  const row = incidentSafeRows.find(x=>x.id===id);
+  if (!row) return;
+  // Copy only this diagnostic allowlist, never credentials or provider data.
+  const safe = {};
+  for (const key of ["id","app_version","operation","category","stage","error_code","severity","lifecycle","detected_at","counts","item_position","exception_class","run_id","job_id","item_id","transitions"])
+    if (Object.hasOwn(row,key) && typeof row[key] === "string") safe[key]=row[key].slice(0,512);
+  safe.counts = {};
+  for (const key of ["completed","failed","total"])
+    if (Number.isInteger(row.counts?.[key]) && row.counts[key]>=0 && row.counts[key]<=1000000) safe.counts[key]=row.counts[key];
+  if (Number.isInteger(row.item_position) && row.item_position>=0 && row.item_position<=1000000) safe.item_position=row.item_position;
+  const stages=["admission","collect","detail","checkpoint","settlement","prepare","product_create","provider_result","complete"];
+  safe.transitions=Array.isArray(row.transitions) ? row.transitions.slice(-8).filter(x=>stages.includes(x)) : [];
+  try { await navigator.clipboard.writeText(JSON.stringify(safe,null,2)); $("incidentStatus").textContent="안전 진단 복사 완료"; }
+  catch { $("incidentStatus").textContent="복사 실패: 브라우저 클립보드 권한을 확인하세요."; }
+});
+function studentIncidents(user) {
+  for (const id of ["incidentVersion","incidentCategory","incidentStage","incidentOperation","incidentErrorCode","incidentSeverity","incidentLifecycle","incidentSince","incidentUntil"]) $(id).value="";
+  $("incidentUser").value = user;
+  document.querySelector('[data-page="incidents"]').click();
+  loadIncidents(false);
+}
+function addIncidentTimelineLink(tr,user) {
+  if (typeof user !== "string" || !user) return;
+  const button=document.createElement("button");
+  button.className="btn ghost"; button.textContent="사고 타임라인";
+  button.addEventListener("click",()=>studentIncidents(user));
+  tr.cells[tr.cells.length-1]?.appendChild(button);
 }
 function datasetState(key) {
   if (!dataStates.has(key)) dataStates.set(key, {generation:0, status:"absent", lastSuccess:null});
@@ -795,6 +835,7 @@ function renderUsers() {
         <button class="btn sm ghost" onclick="editModal('${u.id}')">수정</button>
         <button class="btn sm warn" onclick="resetDevice('${u.id}')">세션 종료</button>
       </td>`;
+    addIncidentTimelineLink(tr,u.id);
     tb.appendChild(tr);
   });
   if (!tb.children.length) tb.innerHTML = `<tr><td colspan="17" style="color:var(--muted)">해당 없음</td></tr>`;
@@ -1237,6 +1278,7 @@ function renderActivity() {
         return t.length ? `<div class="muted" style="font-size:11.5px;margin-top:2px">실패 사유: ${t.slice(0, 4).map(([k, n]) => `${esc(k)} ${n}`).join(" · ")}${t.length > 4 ? ` · 외 ${t.length - 4}종` : ""}</div>` : "";
       })()}</td>
       <td>${a.detail ? `<a href="#" onclick="document.getElementById('${detailId}').classList.toggle('hidden');return false">상세</a>` : ""}</td>`;
+    addIncidentTimelineLink(tr,a.user_id || a.email);
     tb.appendChild(tr);
     if (a.detail) {
       const dr = document.createElement("tr"); dr.id = detailId; dr.className = isErr ? "" : "hidden";   // 문제 신고는 바로 펼쳐서 보여줌
@@ -1524,6 +1566,7 @@ function renderRebate() {
         ${r && r.status === "paid" ? `<button class="btn sm ghost" onclick="unconfirmRebate(${r.id})">확인 취소</button>` : ""}
         <button class="btn sm ghost" onclick="copyRemind('${s.id}','${pm}')">카톡 문구</button>
       </td>`;
+    addIncidentTimelineLink(tr,s.id);
     tb.appendChild(tr);
   });
   if (!tb.children.length) tb.innerHTML = `<tr><td colspan="17" style="color:var(--muted)">해당 없음</td></tr>`;
