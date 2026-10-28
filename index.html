@@ -374,7 +374,8 @@
       <div class="card">
         <h2>🚀 쿠팡 일일 현황·성공률 추이 <small class="muted">— 날짜별 등록 성공률(임시저장까지)·주별 심사 승인률, 실패/반려 사유 TOP5. 승인된 상품의 카테고리는 아래 버튼으로 학습값에 반영하면 다음 등록부터 그 카테고리를 씀</small></h2>
         <div class="row" style="margin:6px 0 8px;flex-wrap:wrap;gap:8px;align-items:center">
-          <label>기간 <select id="cpsWeeks" onchange="loadCoupangStats()"><option value="4">최근 4주</option><option value="8" selected>최근 8주</option><option value="12">최근 12주</option></select></label>
+          <pre id="cpsSafety" style="white-space:pre-wrap">Created ≠ Approved · canary 3 → 10 → 25 · 전수 최신 승인 필요</pre>
+<label>기간 <select id="cpsWeeks" onchange="loadCoupangStats()"><option value="4">최근 4주</option><option value="8" selected>최근 8주</option><option value="12">최근 12주</option></select></label>
           <button class="btn sm" onclick="loadCoupangStats()">불러오기/새로고침</button>
           <button class="btn sm" id="cpsLearnBtn" onclick="cpsLearnApproved()" disabled>✅ 승인된 카테고리 학습값에 반영</button>
           <small class="muted" id="cpsNote">[불러오기]를 누르면 최근 활동 로그에서 집계합니다</small>
@@ -578,7 +579,7 @@ try { $("sbUrl").value = localStorage.getItem("sb_url") || ""; $("sbKey").value 
 if (!$("sbUrl").value) $("sbUrl").value = DEFAULT_SB_URL;
 if (!$("sbKey").value) $("sbKey").value = DEFAULT_SB_KEY;
 async function rpc(name, params = {}) {
-  const mutation = /^admin_/.test(name) && !["admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
+  const mutation = /^admin_/.test(name) && !["admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
   if (mutation && !requireFresh("core")) throw Error("stale");
   if (mutation) { mutationPending = true; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
   try {
@@ -1310,7 +1311,22 @@ async function coupangActivityAllPages(since) {
     cursor = next;
   }
 }
+let cpsSafetyRequest = 0;
+async function loadCoupangSafety() {
+  const request = ++cpsSafetyRequest;
+  let r;
+  try { r = await rpc("admin_coupang_safety", {}); }
+  catch (_) { r = {ok:false}; }
+  if (request !== cpsSafetyRequest) return;
+  if (!r || !r.ok) {
+    $("cpsSafety").textContent = "안전 현황 확인 불가 · 새로고침 후 확인하세요. 생성과 승인은 별개입니다.";
+    return;
+  }
+  $("cpsSafety").textContent = (r.rows || []).map(x =>
+    `${x.user_id} · cap ${x.cap} · Created ${x.created} / Approved ${x.approved} / Rejected ${x.rejected} / Partial ${x.partial} / Unknown ${x.unknown} · ${x.hold || (x.impaired ? "HOLD_RECANARY" : "전수 최신 승인 후 사용자 명시 재개")}`).join("\n");
+}
 async function loadCoupangStats() {
+  loadCoupangSafety().catch(() => {});
   const request = ++cpsRequest;
   const generation = beginDataset("coupang");
   $("cpsNote").textContent = "불러오는 중…";
