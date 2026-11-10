@@ -122,6 +122,7 @@
       <button data-page="deposits">💰 입금 확인 → 자동 연장</button>
       <button data-page="payments">🧾 결제/이용권 기록</button>
       <button data-page="rebate">💸 리베이트 정산</button>
+      <button data-page="live-sales">실시간 월별 매출</button>
       <button data-page="sales">📈 매출 현황</button>
       <button data-page="config">⚙️ 앱 설정 배포</button>
       <button data-page="activity">📦 수강생 활동</button>
@@ -327,6 +328,17 @@
 
     <!-- 로그 -->
     <!-- 매출 현황 -->
+    <div class="page" id="page-live-sales">
+      <h2>실시간 월별 매출</h2>
+      <p>지난 장부까지 읽기 전용으로 확인합니다. 겹친 월은 매출이 큰 장부를 선택하고 표시합니다.</p>
+      <select id="liveStudent"></select>
+      <button class="btn" onclick="loadLiveStudent()">불러오기</button>
+      <button class="btn" onclick="loadAllLive()">모든 수강생 불러오기</button>
+      <button class="btn ghost" onclick="liveCsv(false)">월별 CSV</button>
+      <button class="btn ghost" onclick="liveCsv(true)">전체 수강생 CSV</button>
+      <p id="liveProgress"></p><div id="liveStudents"></div><div id="liveStatus"></div>
+      <div style="overflow:auto" id="liveDetail"></div><div style="overflow:auto" id="liveMatrix"></div>
+    </div>
     <div class="page" id="page-sales">
       <div class="card">
         <h2>월별 매출 현황 <small class="muted">— 리베이트 제출 때 학생이 알려준 기준월 값을 모은 표입니다. 리베이트를 그 달에 제출 안 했으면 빈칸(-)입니다.</small></h2>
@@ -339,7 +351,7 @@
               <option value="dev">차이 (장부 vs 샵마인, %)</option>
             </select>
           </label>
-          <label>기간 <select id="salesMonths" onchange="renderSales()">
+          <label>기간 <select id="salesMonths" onchange="renderSales()"><option value="all">전체 기간</option>
             <option value="6">최근 6개월</option><option value="12" selected>최근 12개월</option><option value="24">최근 24개월</option>
           </select></label>
           <span class="sp" style="flex:1"></span>
@@ -579,7 +591,7 @@ try { $("sbUrl").value = localStorage.getItem("sb_url") || ""; $("sbKey").value 
 if (!$("sbUrl").value) $("sbUrl").value = DEFAULT_SB_URL;
 if (!$("sbKey").value) $("sbKey").value = DEFAULT_SB_KEY;
 async function rpc(name, params = {}) {
-  const mutation = /^admin_/.test(name) && !["admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
+  const mutation = /^admin_/.test(name) && !["admin_ledger_links","admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
   if (mutation && !requireFresh("core")) throw Error("stale");
   if (mutation) { mutationPending = true; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
   try {
@@ -1587,8 +1599,79 @@ function renderRebate() {
   });
   if (!tb.children.length) tb.innerHTML = `<tr><td colspan="17" style="color:var(--muted)">해당 없음</td></tr>`;
 }
+let liveStudents = [], liveResults = {}, liveSelected = '', liveBusy = false;
+async function loadLiveLinks() {
+  const data = await rpc('admin_ledger_links');
+  liveStudents = (data.users || []).filter(s => !s.is_admin);
+  const count = s => new Set([s.ledger_url,s.ledger_history_urls].filter(Boolean).join(',').split(',').filter(Boolean).map(u=>u.match(/\/d\/([^/?#]+)/)?.[1] || u)).size;
+  $('liveStudent').innerHTML = liveStudents.map(s=>`<option value="${esc(s.id)}">${esc(s.student_code || '')} ${esc(s.name || '')} (${count(s)}개)</option>`).join('');
+  $('liveStudents').innerHTML = liveStudents.map(s=>`<div>${esc(s.student_code || '')} ${esc(s.name || '')}: ${count(s)}개</div>`).join('');
+}
+async function fetchLive(id) {
+  const {data,error} = await sb.functions.invoke('ledger-monthly',{body:{user_id:id}});
+  if (error || !data?.ok) throw Error('월별 매출을 불러오지 못했습니다');
+  return data;
+}
+function liveMonths(results) {
+  const keys = [...new Set(results.flatMap(r=>Object.keys(r?.merged || {})))].sort();
+  if (!keys.length) return [];
+  const months = []; let m = keys[0];
+  while (m <= keys[keys.length-1]) { months.push(m); m = ymAdd(m,1); }
+  return months;
+}
+function liveDetailRows(id) {
+  const data = liveResults[id]; if (!data) return [];
+  const rows = [['월','매출','순익','영업일수','겹침','신고 매출과 차이']];
+  for (const m of liveMonths([data])) {
+    const v = data.merged[m] || {sales:0,profit:0,days:0};
+    const reported = salesRowOf(id,m)?.ledger_sales;
+    rows.push([m,v.sales,v.profit,v.days,v.overlap ? '겹침' : '',reported == null ? '' : v.sales-reported]);
+  }
+  rows.push(['합계',...['sales','profit','days'].map(k=>Object.values(data.merged).reduce((sum,v)=>sum+v[k],0)),'','']);
+  return rows;
+}
+function liveTable(rows) { return '<table><tbody>'+rows.map(row=>'<tr>'+row.map(v=>`<td>${esc(String(v))}</td>`).join('')+'</tr>').join('')+'</tbody></table>'; }
+function renderLive(id) {
+  liveSelected = id; const data = liveResults[id];
+  $('liveDetail').innerHTML = liveTable(liveDetailRows(id));
+  $('liveStatus').innerHTML = (data.sheets || []).map(s=>`<div>장부 ${esc(String(s.index))} (${esc(s.sheet_id_suffix)}): ${esc(s.ok ? '읽었습니다' : s.error)} · 건너뛴 행 ${esc(String(s.skipped_rows))}</div>`).join('');
+}
+async function loadLiveStudent() {
+  if (liveBusy || !$('liveStudent').value) return;
+  liveBusy = true; const id = $('liveStudent').value; $('liveProgress').textContent = '불러오는 중입니다';
+  try { liveResults[id] = await fetchLive(id); renderLive(id); $('liveProgress').textContent = '불러왔습니다'; }
+  catch { $('liveProgress').textContent = '불러오지 못했습니다. 다시 시도해주세요'; }
+  finally { liveBusy = false; }
+}
+function liveMatrixRows() {
+  const months = liveMonths(Object.values(liveResults));
+  return [['코드','수강생',...months,'합계'],...liveStudents.map(s=>{
+    const data = liveResults[s.id]; const values = months.map(m=>data ? (data.merged[m]?.sales || 0) : '');
+    return [s.student_code || '',s.name || '',...values,data ? values.reduce((a,v)=>a+Number(v),0) : '불러오지 못했습니다'];
+  })];
+}
+async function loadAllLive() {
+  if (liveBusy) return; liveBusy = true; liveResults = {};
+  try {
+    for (const [i,s] of liveStudents.entries()) {
+      $('liveProgress').textContent = `${i+1}/${liveStudents.length} ${s.name || ''} 불러오는 중입니다`;
+      try { liveResults[s.id] = await fetchLive(s.id); }
+      catch { /* Continue with the next student; missing results are visible in the matrix. */ }
+      $('liveMatrix').innerHTML = liveTable(liveMatrixRows());
+    }
+    $('liveProgress').textContent = `${Object.keys(liveResults).length}/${liveStudents.length}명 불러왔습니다`;
+  } finally { liveBusy = false; }
+}
+function liveCsv(matrix) {
+  const rows = matrix ? liveMatrixRows() : liveDetailRows(liveSelected);
+  const csv = rows.map(row=>row.map(v=>'"'+String(v).replace(/^[=+@-]/,"'"+'$&').replace(/"/g,'""')+'"').join(',')).join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}));
+  a.download = matrix ? '실시간_전체매출.csv' : '실시간_월별매출.csv'; a.click(); URL.revokeObjectURL(a.href);
+}
+
 // ── 매출 현황 (리베이트 제출 값을 기준월로 모아서 보여줌 — 새 서버 호출 없이 rbData 재사용) ──
 function salesMonths() {
+  if ($("salesMonths").value === "all") return [...new Set((rbData?.rows || []).map(r => r.base_month).filter(m => /^\d{4}-\d{2}$/.test(m)))].sort();
   const n = Number($("salesMonths").value);
   const months = []; for (let i = 0; i < n; i++) months.push(ymAdd(ymNow(), -i));
   return months;   // 최신순
@@ -1736,7 +1819,7 @@ function studentModal(uid) {
       ${kv("리베이트 관리 대상", `<label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="s_rebate_excluded" ${s.rebate_admin_excluded ? "checked" : ""}> 이 학생은 독촉·연간검증대조에서 제외 (자진신고와 별개로 강사가 직접 지정)</label>`)}
       ${kv("이메일", esc(s.email))}${kv("가입일", esc(String(s.created_at || "").slice(0, 10)))}${kv("연락처", esc(s.phone))}${kv("입금자명", esc(s.deposit_name))}${kv("본인 계좌", esc(s.bank_account))}
       ${kv("사업자등록번호", esc(s.biz_numbers))}${kv("관계인 사업자", esc(s.related_biz))}${kv("스마트스토어 목록", esc(s.store_list))}${kv("쿠팡 판매자ID 목록", esc(s.coupang_list))}${kv("계정별 사업자 매핑", esc(s.account_map))}
-      ${kv("장부 링크", s.ledger_url ? (safeUrl(s.ledger_url) ? `<a href="${esc(safeUrl(s.ledger_url))}" target="_blank" rel="noopener noreferrer">${esc(s.ledger_url)}</a>` : `<span class="tag err">주소 형식 아님</span> ${esc(s.ledger_url)}`) : "")}
+      ${kv("장부 링크", s.ledger_url ? s.ledger_url.split(",").map(link => link.trim()).filter(Boolean).map(link => (safeUrl(link) ? `<a href="${esc(safeUrl(link))}" target="_blank" rel="noopener noreferrer">${esc(link)}</a>` : `<span class="tag err">주소 형식 아님</span> ${esc(link)}`)).join("<br>") : "")}
       <div style="margin-top:10px;font-weight:700;font-size:13px">🧾 세금계산서 발급 정보</div>
       ${kv("사업자등록번호(세금계산서용)", esc(s.tax_biz_number))}${kv("상호", esc(s.trade_name))}${kv("대표자 성명", esc(s.ceo_name))}${kv("받을 이메일", esc(s.tax_email))}
       ${kv("신고서", docs.length ? docs.map((d) => `<a href="#" class="js-open-storage" data-path="${esc(d.file_path)}">${d.year}년 ${d.kind === "vat" ? "부가세" : "종소세"}</a>`).join(" · ") : "")}
@@ -1960,6 +2043,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   try { localStorage.setItem("adm_tab", b.dataset.page); } catch {}
   if (b.dataset.page === "payments") loadPayments().catch((e) => toast(safeError()));
   if (b.dataset.page === "rebate") loadRebate().catch((e) => toast("리베이트 불러오기 실패: " + safeError()));
+  if (b.dataset.page === "live-sales") loadLiveLinks().catch(() => toast(safeError()));
   if (b.dataset.page === "sales") renderSales();
   if (b.dataset.page === "activity") { loadActivity().catch((e) => toast(safeError())); loadActivityTrend().catch((e) => toast(safeError())); loadCoupangStats().catch((e) => toast(safeError())); }
   if (b.dataset.page === "log") loadLog().catch((e) => toast(safeError()));
