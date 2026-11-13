@@ -106,6 +106,18 @@
   .toast { border-radius:16px; animation:toastin .2s ease-out; }
   @media(max-width:700px) { .wrap { padding:12px; } .top { padding:16px; gap:10px; } .top h1 { width:100%; } .areas { display:grid; grid-template-columns:1fr 1fr; } .areas button { padding:12px 8px; } .card { padding:14px; } .stats { grid-template-columns:repeat(2,minmax(0,1fr)) !important; } #stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); } #stats .stat { min-width:0; } .stat .v { font-size:18px; } .search { max-width:100%; } }
   @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
+
+  button:focus-visible,[tabindex]:focus-visible,summary:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+  .avatar { display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;margin-right:7px;color:#493a53;font-weight:700;vertical-align:middle; }
+  .tag.info { background:#e3efff;color:#3166a0; }
+  .stat:nth-child(4n+1) { background:#f0eaff; }.stat:nth-child(4n+2) { background:#e6f6ef; }.stat:nth-child(4n+3) { background:#fff1da; }.stat:nth-child(4n) { background:#ffe8ef; }
+  #stats .stat:nth-child(5) { background:#e6f2fc; }#stats .stat:nth-child(6) { background:#fff4e9; }#stats .stat:nth-child(7) { background:#f4e8f9; }#stats .stat:nth-child(8) { background:#e9f4d9; }
+  #todayTasks button { display:flex;justify-content:space-between;width:100%;margin:6px 0;text-align:left; }
+  #financeSummary summary { display:inline-block;cursor:pointer;padding:9px 16px;border-radius:999px;background:#eee7ff;color:#59499a;margin:8px 0; }
+  .finance-chart { width:100%;height:260px; }.chart-bar { transform-origin:bottom;animation:barGrow .65s ease-out;transform-box:fill-box; }
+  @keyframes barGrow { from { transform:scaleY(0); } to { transform:scaleY(1); } }
+  .chart-legend { display:flex;gap:16px;flex-wrap:wrap; }.chart-tip { position:fixed;z-index:50;background:#493a53;color:white;padding:10px;border-radius:12px;pointer-events:none;white-space:pre-line; }
+  @media(max-width:639px) { .tabs { flex-wrap:nowrap;overflow-x:auto;scroll-snap-type:x mandatory; }.tabs button { flex:none;white-space:nowrap;scroll-snap-align:start; }.tbl-wrap table:not(#users) th:first-child,.tbl-wrap table:not(#users) td:first-child { position:sticky;left:0;background:var(--panel);z-index:1; }.tbl-wrap table:not(#users) th:first-child { z-index:3; }.tbl-wrap:has(> .finance-months) { max-height:none; }.finance-months thead { display:none; }.finance-months,.finance-months tbody { display:block; }.finance-months tr { display:block;padding:12px;margin:8px;border:1px solid var(--line);border-radius:16px; }.finance-months td,.finance-months th { display:flex;justify-content:space-between;position:static!important;white-space:normal; }.finance-months td::before { content:attr(data-label);color:var(--muted); } }
 </style>
 </head>
 <body>
@@ -136,11 +148,12 @@
       <h1>하이크롤 관리자</h1>
       <span id="who" style="color:var(--muted);font-size:13px;"></span>
       <span class="sp"></span>
-      <button class="btn ghost" onclick="reloadAll()">새로고침</button>
+      <button class="btn ghost" onclick="refreshAdmin()">새로고침</button>
       <button class="btn ghost" onclick="backupAll()" title="수강생·입금·리베이트·활동 로그·설정을 JSON 파일 하나로 내려받기 (사고 났을 때 되돌릴 기준점)">💾 전체 백업</button>
       <button class="btn ghost" onclick="doLogout()">로그아웃</button>
     </div>
 
+    <section class="card" id="todayTasks" aria-labelledby="todayHeading"><h2 id="todayHeading">🏠 오늘 할 일</h2><div id="todayRows" aria-live="polite">불러오는 중…</div></section>
     <div class="stats" id="stats"></div>
 
 <nav class="areas" aria-label="관리 영역">
@@ -235,6 +248,7 @@
           </select>
           <input class="search" id="rbQ" placeholder="코드/이름/이메일 검색" oninput="renderRebate()">
           <span class="sp" style="flex:1"></span>
+          <button class="btn sm" id="rbBulkConfirm" disabled onclick="bulkConfirmModal()">선택 입금 확인 (0건)</button>
           <button class="btn ghost sm" onclick="rbExportCsv()">CSV 내보내기</button>
           <button class="btn ghost sm" onclick="rbCopyRemindAll()">미제출·미납자 카톡 문구 복사</button>
           <small class="muted"><span id="rbOthers"></span>실지급액 = 기준월(지급월−3) 샵마인 정상주문(취소·반품 제외) 판매가 × 요율 × (1+부가세). 지연이자는 연 요율 ÷ 365 × 지연일수.</small>
@@ -242,7 +256,7 @@
         <div class="tbl-wrap" style="max-height:640px">
           <table id="rbTable">
             <thead><tr>
-              <th>코드</th><th>수강생</th><th>상태</th><th class="num">샵마인 매출</th><th class="num">건수</th><th class="num">장부 매출</th><th>편차</th><th class="num">장부 순수익</th><th>계정수<br><small>스토어/쿠팡</small></th>
+              <th><input type="checkbox" id="rbSelectAll" aria-label="이체 보고 행 전체 선택" onchange="selectReported(this.checked)"></th><th>코드</th><th>수강생</th><th>상태</th><th class="num">샵마인 매출</th><th class="num">건수</th><th class="num">장부 매출</th><th>편차</th><th class="num">장부 순수익</th><th>계정수<br><small>스토어/쿠팡</small></th>
               <th class="num">예정 실지급액</th><th>이체 보고</th><th class="num">실입금</th><th class="num">차액</th><th>지연</th><th class="num">지연이자</th><th>증빙</th><th></th>
             </tr></thead>
             <tbody></tbody>
@@ -541,6 +555,7 @@ async function loadIncidents(next) {
     if (typeof data.next_cursor?.before_at === "string" && typeof data.next_cursor?.before_id === "string") incidentCursor = {before_at:data.next_cursor.before_at,before_id:data.next_cursor.before_id};
     $("incidentRows").innerHTML = renderIncidentRows(data.items);
     incidentSafeRows = data.items.slice(0,100);
+    renderToday();
     const today = new Date().toISOString().slice(0,10);
     $("incidentOverview").textContent = `현재 페이지: ${incidentSafeRows.length}건 · critical ${incidentSafeRows.filter(x=>x.severity==="critical").length} · 오늘 ${incidentSafeRows.filter(x=>String(x.detected_at).slice(0,10)===today).length} · 학생 ${new Set(incidentSafeRows.map(x=>x.user_id)).size}명 (상태 변경 없는 진단 기록)`;
     $("incidentStatus").textContent = `${data.items.length ? Math.min(data.items.length,100)+"건 (읽기 전용)" : "조건에 맞는 사고가 없습니다."} · 갱신 ${new Date().toLocaleString()}`;
@@ -631,6 +646,7 @@ async function rpc(name, params = {}) {
   try {
     const { data, error } = await sb.rpc("application_session_call", { p_name: name, p_args: params, p_proof: sb.applicationProof });
     if (error || (data && data.ok === false)) throw new Error(safeError());
+    if (mutation) invalidateTabCache();
     return data;
   } finally {
     if (mutation) { mutationPending = false; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
@@ -760,7 +776,40 @@ async function refreshPublicRelease() {
 }
 // End public release
 
+const tabCache = new Map();
+function invalidateTabCache() { tabCache.clear(); }
+async function cachedTab(name, load) {
+  if (tabCache.has(name)) return tabCache.get(name);
+  const pending = Promise.resolve().then(load); tabCache.set(name, pending);
+  try { await pending; } catch (e) { tabCache.delete(name); throw e; }
+}
+async function refreshAdmin() {
+  await reloadAll();
+  const tab = document.querySelector('.tabs button.active')?.dataset.page;
+  if (tab && tab !== 'users') gotoTab(tab);
+}
+let lastStats = null;
+function taskNavigate(tab, filter = '') {
+  if (tab === 'users') { $('filter').value = filter === 'all' ? '' : filter; $('q').value = ''; renderUsers(); }
+  if (tab === 'rebate') { $('rbFilter').value = filter; $('rbQ').value = ''; $('rbMonth').value = ymNow(); }
+  gotoTab(tab);
+  if (tab === 'rebate' && rbData) renderRebate();
+}
+function renderToday() {
+  if (!lastStats) return;
+  const pm = ymNow(), rows = rbData ? rbRowsFor(pm) : [];
+  const reported = rows.filter(({r}) => rbState(pm,r)[2] === 'reported').length;
+  const overdue = rows.filter(({r}) => { const [, , key, late] = rbState(pm,r); return late && key !== 'paid' && key !== 'reported'; }).length;
+  const tasks = [['리베이트 입금 확인 대기',reported,'rebate','reported'],['미납·지연',overdue,'rebate','overdue'],['미결제 대기',lastStats.pending,'users','pending'],['7일 내 만료',lastStats.expiring_7d,'users','expiring']];
+  if (incidentFilters) tasks.push(['최근 24시간 클라이언트 오류',incidentSafeRows.filter(r => { const age = Date.now()-Date.parse(r.detected_at); return age >= 0 && age <= 86400000; }).length,'incidents','']);
+  $('todayRows').innerHTML = tasks.filter(x=>x[1]>0).map(([label,n,tab,filter])=>`<button class="btn ghost" onclick="taskNavigate('${tab}','${filter}')"><span>${label}</span><b>${num(n)}건 →</b></button>`).join('') || '오늘은 할 일 없음 🎉';
+}
+function avatar(student) {
+  let hash = 0; for (const c of String(student.user_id || student.id || student.email || '')) hash = ((hash * 31) + c.charCodeAt(0)) | 0;
+  return `<span class="avatar" aria-hidden="true" style="background:hsl(${Math.abs(hash)%360} 65% 89%)">${esc(Array.from(student.name || '?')[0])}</span>`;
+}
 async function reloadAll() {
+  if (arguments[0] !== false) invalidateTabCache();
   await freshLoad("core", async () => {
     const [st, us, cfg, rbd] = await Promise.all([rpc("admin_stats"), rpc("admin_users"), sb.from("app_config").select("key,value"), rpc("admin_rebates")]);
     if (cfg.error || !Array.isArray(cfg.data) || !Array.isArray(us?.users) || !Array.isArray(rbd?.students)) throw Error("dataset");
@@ -773,16 +822,18 @@ async function reloadAll() {
   });
 }
 function renderStats(s) {
+  lastStats = s; renderToday();
   const items = [
-    ["전체 수강생", s.total, "", ""], ["이용 중", s.active, "ok", ""], ["7일 내 만료", s.expiring_7d, s.expiring_7d ? "warn" : "", ""],
-    ["미결제 대기", s.pending, s.pending ? "warn" : "", ""], ["이번 달 사용 DB", num(s.used_this_month), "", ""], ["오늘 크롤링 작업", s.leases_today, "", ""],
+    ["전체 수강생", s.total, "", "all"], ["이용 중", s.active, "ok", "active"], ["7일 내 만료", s.expiring_7d, s.expiring_7d ? "warn" : "", "expiring"],
+    ["미결제 대기", s.pending, s.pending ? "warn" : "", "pending"], ["이번 달 사용 DB", num(s.used_this_month), "", ""], ["오늘 크롤링 작업", s.leases_today, "", ""],
   ];
   if (rbData) {
     const pm = ymNow(); let todo = 0, wait = 0;
     rbTargets().forEach((st) => { const [, , key] = rbState(pm, rebateRowOf(st.id, pm)); if (key === "reported") wait++; else if (key !== "paid" && key !== "na") todo++; });
     items.push([`${pm.slice(5)}월 리베이트 미제출·미납`, todo, todo ? "warn" : "ok", "rebate"], ["리베이트 확인 대기", wait, wait ? "warn" : "", "rebate"]);
   }
-  $("stats").innerHTML = items.map(([k, v, c, go]) => `<div class="stat ${go ? "link" : ""}" ${go ? `onclick="gotoTab('${go}')"` : ""}><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
+  const icons = ['👥','🌱','⏳','💳','🗂️','⚡','📋','🏦'];
+  $("stats").innerHTML = items.map(([k, v, c, go],i) => `<div class="stat ${go ? "link" : ""}" ${go ? `role="button" tabindex="0" aria-label="${k}" onclick="taskNavigate('${go === 'rebate' && i === 7 ? 'rebate' : 'users'}','${go === 'rebate' ? (i === 7 ? 'reported' : 'rebate') : go}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}"` : ""}><div class="k">${icons[i]} ${k}</div><div class="v ${c}">${v}</div></div>`).join("");
 }
 function animateKpis(root) {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -808,7 +859,7 @@ function profileMissing(uid) {
 
 // ── 수강생 표 ───────────────────────────────────────
 function statusOf(u) {
-  if (u.is_admin) return ["관리자", "muted"];
+  if (u.is_admin) return ["관리자", "info"];
   if (u.days_left === null || u.days_left === undefined) return ["미결제", "warn"];
   if (u.days_left < 0) return [`만료 ${-u.days_left}일 지남`, "err"];
   if (u.days_left <= 7) return [`D-${u.days_left}`, "warn"];
@@ -875,7 +926,7 @@ function renderUsers() {
     const lp = u.last_payment;
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${esc(u.email)}</td><td class="user-name">${esc(u.name || "")}${u.student_code ? ` <small class="muted">[${esc(u.student_code)}]</small>` : ""}</td><td>${esc(u.deposit_name || "")}</td><td><span class="tag ${cls}">${st}</span></td>
+      <td>${esc(u.email)}</td><td class="user-name">${avatar(u)}${esc(u.name || "")}${u.student_code ? ` <small class="muted">[${esc(u.student_code)}]</small>` : ""}</td><td>${esc(u.deposit_name || "")}</td><td><span class="tag ${cls}">${st}</span></td>
       <td>${u.active_until || "-"}</td>
       <td class="num">${num(u.quota_monthly)}</td><td class="num">${num(u.quota_used)}</td><td class="num">${num(u.quota_extra)}</td>
       <td class="num"><b>${num(left)}</b></td>
@@ -1193,9 +1244,9 @@ async function loadPayments() {
     const tb = $("payments").querySelector("tbody"); tb.innerHTML = "";
     (r.payments || []).forEach((p) => {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${esc((p.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(p.email || "")}</td><td>${esc(p.name || "")}</td>
+      tr.innerHTML = `<td>${esc((p.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(p.email || "")}</td><td>${avatar(p)}${esc(p.name || "")}</td>
         <td class="num">${won(p.amount)}</td><td class="num">${p.months || 0}</td><td class="num">${num(p.quota_added)}</td>
-        <td>${esc(p.method)}</td><td>${p.period_from || ""}${p.period_to ? " ~ " + p.period_to : ""}</td><td>${esc(p.note || "")}</td>`;
+        <td><span class="tag info">${esc(p.method)}</span></td><td>${p.period_from || ""}${p.period_to ? " ~ " + p.period_to : ""}</td><td>${esc(p.note || "")}</td>`;
       tb.appendChild(tr);
     });
 
@@ -1330,7 +1381,7 @@ function renderActivity() {
     const isErr = a.kind === "error_report";
     const tr = document.createElement("tr");
     if (isErr) tr.style.background = "#fff5f5";
-    tr.innerHTML = `<td>${esc((a.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(a.student_code || "-")}</td><td>${esc(a.name || a.email)}</td>
+    tr.innerHTML = `<td>${esc((a.created_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(a.student_code || "-")}</td><td>${avatar(a)}${esc(a.name || a.email)}</td>
       <td>${isErr ? `<span class="tag err">문제 신고</span>` : esc(ACT_KIND_KO[a.kind] || a.kind)}</td><td>${esc(a.summary)}${(() => {
         const t = a.kind === "coupang_upload" || a.kind === "crawl_detail" ? actFailTally(a) : [];   // 요약 줄에서 바로 실패 사유가 보이게 (상세 안 펼쳐도)
         return t.length ? `<div class="muted" style="font-size:11.5px;margin-top:2px">실패 사유: ${t.slice(0, 4).map(([k, n]) => `${esc(k)} ${n}`).join(" · ")}${t.length > 4 ? ` · 외 ${t.length - 4}종` : ""}</div>` : "";
@@ -1505,7 +1556,7 @@ function renderActivityTrend() {
     const seenTxt = idleDays === null ? `<span class="tag err">기록 없음</span>` : dormant ? `<span class="tag err">${idleDays}일 전 ⚠</span>` : idleDays >= 7 ? `<span class="tag warn">${idleDays}일 전</span>` : `<span class="tag ok">${idleDays === 0 ? "오늘" : idleDays + "일 전"}</span>`;
     const tr = document.createElement("tr");
     if (dormant) tr.style.background = "#fff5f5";
-    tr.innerHTML = `<td>${esc(u.student_code || "-")}</td><td>${esc(u.name || u.email)}</td><td>${seenTxt}</td>${cells}`;
+    tr.innerHTML = `<td>${esc(u.student_code || "-")}</td><td>${avatar(u)}${esc(u.name || u.email)}</td><td>${seenTxt}</td>${cells}`;
     tb.appendChild(tr);
   });
   if (!tb.children.length) tb.innerHTML = `<tr><td colspan="${3 + weekKeys.length}" class="muted">해당 없음</td></tr>`;
@@ -1565,14 +1616,14 @@ function devTag(d) {
   const p = (d * 100).toFixed(1) + "%";
   return d <= 0.02 ? `<span class="tag ok">${p} ✓</span>` : d <= 0.05 ? `<span class="tag warn">${p} ⚠</span>` : `<span class="tag err">${p} 🚨</span>`;
 }
-const stuLabel = (s) => `${s.student_code ? `[${esc(s.student_code)}] ` : ""}${esc(s.name || "")} <small class="muted">${esc(s.email)}</small>`;
+const stuLabel = (s) => `${avatar(s)}${s.student_code ? `[${esc(s.student_code)}] ` : ""}${esc(s.name || "")} <small class="muted">${esc(s.email)}</small>`;
 function rbMonthShift(d) {
   const sel = $("rbMonth"); const i = sel.selectedIndex + d;
   if (i < 0 || i >= sel.options.length) return;
   sel.selectedIndex = i; renderRebate();
 }
 async function loadRebate() {
-  await reloadAll();
+  await reloadAll(false);
   if (!requireFresh("core")) return;
   const sel = $("rbMonth"), keep = sel.value;
   const months = []; for (let i = 0; i < 14; i++) months.push(ymAdd(ymNow(), -i));
@@ -1583,7 +1634,7 @@ async function loadRebate() {
   const c = rbCfg();
   $("cfg_rb_rate").value = c.rate; $("cfg_rb_vat").value = c.vat; $("cfg_rb_due").value = c.due_day; $("cfg_rb_late").value = c.late_rate; $("cfg_rb_start").value = c.start_month || "";
   renderRebate(); renderRefund(); renderAnnual();
-  await loadFinanceSummary();
+  await cachedTab("finance", () => loadFinanceSummary());
 }
 
 const rbTargets = () => rbData.students.filter((s) => !s.rebate_admin_excluded);
@@ -1600,6 +1651,27 @@ async function zeroSales(uid, pm) {
     toast("매출 0원 완료"); await loadRebate();
   } catch { toast("처리 실패: " + safeError()); }
 }
+function financeChart(data) {
+  const months = [...new Set((data.monthly || []).map(r=>r.month))].sort();
+  const streams = ['rebate','fee','asep'], colors = ['#b5a1ef','#8cd4b5','#f4bd88'], labels = ['리베이트','프로그램비','에이셉'];
+  const values = months.map(m=>streams.map(k=>Number((data.monthly || []).find(r=>r.month===m && r.stream===k)?.amount || 0)));
+  const max = Math.max(1,...values.map(v=>v.reduce((a,b)=>a+b,0)));
+  const width = Math.max(360,months.length*80), slot = (width-40)/Math.max(1,months.length);
+  return `<div class="chart-legend">${labels.map((l,i)=>`<span style="color:${colors[i]}">● <span style="color:var(--text)">${l}</span></span>`).join('')}</div><div class="tbl-wrap"><svg class="finance-chart" viewBox="0 0 ${width} 260" role="img" aria-label="월별 리베이트 프로그램비 에이셉 수익 누적 막대 차트">${months.map((m,i)=>{ let y=220; const tip = m+'\n'+labels.map((l,j)=>l+': '+won(values[i][j])).join('\n'); return `<g tabindex="0" data-chart-tip="${esc(tip)}"><title>${esc(tip)}</title>${values[i].map((v,j)=>{ const h=Math.max(0,v/max*185); y-=h; return `<rect class="chart-bar" x="${25+i*slot}" y="${y}" width="${slot*.6}" height="${h}" rx="4" fill="${colors[j]}"/>`; }).join('')}<text x="${25+i*slot}" y="245" font-size="12" fill="currentColor">${esc(m)}</text></g>`; }).join('')}</svg></div>`;
+}
+document.addEventListener('pointerover', event => {
+  const bar = event.target.closest('[data-chart-tip]'); if (!bar) return;
+  document.querySelector('.chart-tip')?.remove();
+  const tip = document.createElement('div'); tip.className='chart-tip'; tip.textContent=bar.dataset.chartTip;
+  tip.style.left=Math.min(event.clientX+10,window.innerWidth-230)+'px'; tip.style.top=Math.max(5,event.clientY-90)+'px'; document.body.appendChild(tip);
+});
+document.addEventListener('pointerout', event => { if(event.target.closest('[data-chart-tip]')) document.querySelector('.chart-tip')?.remove(); });
+function financeChange(data,month,total) {
+  const previous = (data.monthly || []).filter(r=>r.month === ymAdd(month,-1)).reduce((a,r)=>a+BigInt(r.amount || 0),0n);
+  if (!previous) return '<small class="tag muted">전월 비교 없음</small>';
+  const change = Number((total-previous)*1000n/previous)/10;
+  return `<small class="tag ${change>0?'ok':change<0?'err':'muted'}">${change>0?'▲':change<0?'▼':'−'} ${Math.abs(change).toFixed(1)}%</small>`;
+}
 async function loadFinanceSummary() {
   const box = $("financeSummary"); box.innerHTML = '<div class="skeleton" role="status">불러오는 중…</div>';
   try {
@@ -1611,22 +1683,81 @@ async function loadFinanceSummary() {
     const streams = ['rebate','fee','asep'];
     box.innerHTML = `<p class="muted">전체 기록 기준 · 실입금 합계 · 매출 0원 완료는 별도 집계</p>
       <div class="stats">${[...streams,'total'].map(k => `<div class="stat"><div class="k">${label[k] || '🌷 총 수익'} · 전체 기간</div><div class="v">${won(k==='total' ? sum(Object.values(totals)) : totals[k] || 0n)}</div></div>`).join('')}</div>
-      <div class="tbl-wrap"><table><thead><tr><th>월</th>${streams.map(k=>`<th class="num">${label[k]}</th>`).join('')}<th class="num">총 수익</th></tr></thead><tbody>${months.map(month => { const values=streams.map(k=>BigInt((data.monthly || []).find(r=>r.month===month && r.stream===k)?.amount || 0)); return `<tr><td>${esc(month)}</td>${values.map(v=>`<td class="num">${won(v)}</td>`).join('')}<td class="num"><b>${won(sum(values))}</b></td></tr>`; }).join('') || '<tr><td colspan="5">입금 기록 없음</td></tr>'}<tr><th>전체 기간 · 총 수익</th>${streams.map(k=>`<td class="num">${won(totals[k] || 0n)}</td>`).join('')}<td class="num"><b>${won(sum(Object.values(totals)))}</b></td></tr></tbody></table></div>
+      ${financeChart(data)}<div class="tbl-wrap"><table class="finance-months"><thead><tr><th>월</th>${streams.map(k=>`<th class="num">${label[k]}</th>`).join('')}<th class="num">총 수익</th></tr></thead><tbody>${months.map(month => { const values=streams.map(k=>BigInt((data.monthly || []).find(r=>r.month===month && r.stream===k)?.amount || 0)); return `<tr><td>${esc(month)}</td>${values.map((v,i)=>`<td class="num" data-label="${label[streams[i]]}">${won(v)}</td>`).join('')}<td class="num" data-label="총 수익"><b>${won(sum(values))}</b> ${financeChange(data,month,sum(values))}</td></tr>`; }).join('') || '<tr><td colspan="5">입금 기록 없음</td></tr>'}<tr><th>전체 기간 · 총 수익</th>${streams.map(k=>`<td class="num">${won(totals[k] || 0n)}</td>`).join('')}<td class="num"><b>${won(sum(Object.values(totals)))}</b></td></tr></tbody></table></div>
       <details><summary>월별 입금 건수와 매출 0원 완료</summary><div class="tbl-wrap"><table><thead><tr><th>월</th><th>구분</th><th class="num">입금 건수</th><th class="num">매출 0원 완료</th></tr></thead><tbody>${(data.monthly || []).map(r=>`<tr><td>${esc(r.month)}</td><td>${esc(label[r.stream] || r.stream)}</td><td class="num">${num(r.count)}</td><td class="num">${num(r.zero_sales_count)}</td></tr>`).join('')}</tbody></table></div></details>
-      <details><summary>매출 0원 완료 내역 (${(data.zero_sales || []).length}건)</summary><div class="tbl-wrap"><table><thead><tr><th>지급월</th><th>수강생</th><th>사유</th></tr></thead><tbody>${(data.zero_sales || []).map(r=>`<tr><td>${esc(r.pay_month)}</td><td>${esc(r.name || r.email || r.user_id)}</td><td>${esc(r.reason || '')}</td></tr>`).join('')}</tbody></table></div></details>`;
+      <details><summary>매출 0원 완료 내역 (${(data.zero_sales || []).length}건)</summary><div class="tbl-wrap"><table><thead><tr><th>지급월</th><th>수강생</th><th>사유</th></tr></thead><tbody>${(data.zero_sales || []).map(r=>`<tr><td>${esc(r.pay_month)}</td><td>${avatar(r)}${esc(r.name || r.email || r.user_id)}</td><td>${esc(r.reason || '')}</td></tr>`).join('')}</tbody></table></div></details>`;
+    box.querySelectorAll('details').forEach((details,i) => {
+      const summary = details.querySelector('summary'), label = summary.textContent;
+      summary.remove();
+      const panel = document.createElement('div'); panel.id = 'financeDetail'+i; panel.hidden = true;
+      while (details.firstChild) panel.appendChild(details.firstChild);
+      const toggle = document.createElement('button'); toggle.className = 'btn ghost'; toggle.style.margin = '8px 0'; toggle.textContent = label;
+      toggle.setAttribute('aria-expanded','false'); toggle.setAttribute('aria-controls',panel.id);
+      toggle.onclick = () => { panel.hidden = !panel.hidden; toggle.setAttribute('aria-expanded',String(!panel.hidden)); };
+      details.replaceWith(toggle,panel);
+    });
     animateKpis(box);
-  } catch { box.textContent = "돈 관리 요약 불러오기 실패"; }
+  } catch { tabCache.delete("finance"); box.textContent = "돈 관리 요약 불러오기 실패"; }
 }
 function rbState(pm, r) {
   const late = rbBeforeStart(pm) ? 0 : daysLate(pm);
   if (!r && rbBeforeStart(pm)) return ["시작 전", "muted", "na", 0];   // 앱 정산 전 달 — 할 일·지연 집계에서 제외
   if (!r) return late ? ["미제출 · 지연", "err", "unsubmitted", late] : ["미제출", "warn", "unsubmitted", 0];
-  if (r.status === "paid") return [r.completion_kind === "zero_sales" ? "매출 0원 완료" : "입금 확인 완료", "ok", "paid", 0];
+  if (r.status === "paid") return [r.completion_kind === "zero_sales" ? "매출 0원 완료" : "입금 확인 완료", r.completion_kind === "zero_sales" ? "muted" : "ok", "paid", 0];
   if (r.status === "reported" || r.reported_at) return ["입금 확인 대기", "warn", "reported", 0];
   return late ? [`제출됨 · 미납 ${late}일`, "err", "submitted", late] : ["제출됨 · 이체 대기", "warn", "submitted", late];
 }
+const selectedRebates = new Set();
+let bulkRunning = false;
+function reportedSelections() {
+  return (rbData?.rows || []).filter(r => selectedRebates.has(String(r.id)) && r.pay_month === $('rbMonth').value && r.status !== 'paid' && rbState(r.pay_month,r)[2] === 'reported' && r.reported_amount != null && r.reported_at);
+}
+function updateBulkSelection() {
+  const checks = [...document.querySelectorAll('.rb-select')];
+  const count = reportedSelections().length;
+  $('rbBulkConfirm').textContent = `선택 입금 확인 (${count}건)`;
+  $('rbBulkConfirm').disabled = !count || bulkRunning;
+  $('rbSelectAll').checked = checks.length > 0 && checks.every(c=>c.checked);
+  $('rbSelectAll').indeterminate = checks.some(c=>c.checked) && !checks.every(c=>c.checked);
+}
+function selectReported(checked) {
+  document.querySelectorAll('.rb-select').forEach(c => { c.checked = checked; if (checked) selectedRebates.add(c.value); else selectedRebates.delete(c.value); });
+  updateBulkSelection();
+}
+function toggleReported(input) {
+  if (input.checked) selectedRebates.add(input.value); else selectedRebates.delete(input.value);
+  updateBulkSelection();
+}
+function bulkConfirmModal() {
+  if (!requireFresh('core') || bulkRunning) return;
+  const rows = reportedSelections(); if (!rows.length) return;
+  openModal(`<h3>선택 입금 확인 (${rows.length}건)</h3><p>수강생이 보고한 금액과 입금일로 확인합니다.</p><ul>${rows.map(r=>`<li>${esc(studentOf(r.user_id)?.name || '')} · ${won(r.reported_amount)} · ${esc(r.reported_at)}</li>`).join('')}</ul><p><b>합계 ${won(rows.reduce((sum,r)=>sum+BigInt(r.reported_amount),0n))}</b></p><button class="btn ghost" onclick="closeModal()">취소</button> <button class="btn" id="bulkConfirmRun">확인 처리</button><div id="bulkProgress" role="status" aria-live="polite"></div>`);
+  $('bulkConfirmRun').onclick = () => runBulkConfirm(rows.map(r=>({...r})));
+}
+async function runBulkConfirm(rows) {
+  if (bulkRunning || !requireFresh('core')) return;
+  bulkRunning = true; $('bulkConfirmRun').disabled = true;
+  const failures = []; let completed = 0;
+  try {
+    for (const row of rows) {
+      if (!requireFresh('core')) { failures.push(`${studentOf(row.user_id)?.name || row.id}: 최신 데이터 확인 실패`); continue; }
+      try {
+        await rpc('admin_rebate_confirm', {p_id:row.id,p_amount:row.reported_amount,p_paid_at:row.reported_at,p_memo:null});
+        selectedRebates.delete(String(row.id));
+      } catch { failures.push(`${studentOf(row.user_id)?.name || row.id}: 처리 실패`); }
+      completed++;
+      if ($('bulkProgress')) $('bulkProgress').textContent = `${completed}/${rows.length} 처리 중 · 실패 ${failures.length}건`;
+      // Each mutation locks the core dataset; refresh before the next confirmation.
+      await reloadAll();
+    }
+    await loadRebate();
+    if ($('bulkProgress')) $('bulkProgress').textContent = `${completed}/${rows.length} 처리 완료${failures.length ? ' · '+failures.join(' / ') : ' · 모두 확인됨'}`;
+  } finally { bulkRunning = false; updateBulkSelection(); }
+}
 function renderRebate() {
   if (!rbData) return;
+  const valid = new Set((rbData.rows || []).filter(r=>r.pay_month === $('rbMonth').value && r.status !== 'paid').map(r=>String(r.id)));
+  for (const id of selectedRebates) if (!valid.has(id)) selectedRebates.delete(id);
   const pm = $("rbMonth").value, f = $("rbFilter").value, q = $("rbQ").value.trim().toLowerCase(), c = rbCfg();
   const tb = $("rbTable").querySelector("tbody"); tb.innerHTML = "";
   const all = rbRowsFor(pm);
@@ -1650,7 +1781,7 @@ function renderRebate() {
     const diff = r && r.status === "paid" ? (r.paid_amount || 0) - r.total : null;
     const interest = r && key !== "paid" && late ? Math.round(r.total * c.late_rate / 365 * late) : 0;
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(s.student_code || "-")}</td><td><a href="#" onclick="studentModal('${s.id}');return false">${esc(s.name || "(이름 없음)")}</a><br><small class="muted">${esc(s.email)}</small></td>
+    tr.innerHTML = `<td>${r && key === 'reported' && r.status !== 'paid' && r.reported_amount != null && r.reported_at ? `<input class="rb-select" type="checkbox" value="${esc(String(r.id))}" aria-label="${esc(s.name || s.email)} 입금 선택" ${selectedRebates.has(String(r.id)) ? 'checked' : ''} onchange="toggleReported(this)">` : ''}</td><td>${esc(s.student_code || "-")}</td><td>${avatar(s)}<a href="#" onclick="studentModal('${s.id}');return false">${esc(s.name || "(이름 없음)")}</a><br><small class="muted">${esc(s.email)}</small></td>
       <td><span class="tag ${cls}">${st}</span></td>
       <td class="num">${r ? won(r.shopmine_sales) : "-"}</td><td class="num">${r ? num(r.shopmine_count) : "-"}</td>
       <td class="num">${r && r.ledger_sales != null ? won(r.ledger_sales) : "-"}</td><td>${devTag(devOf(r))}</td>
@@ -1670,7 +1801,8 @@ function renderRebate() {
     addIncidentTimelineLink(tr,s.id);
     tb.appendChild(tr);
   });
-  if (!tb.children.length) tb.innerHTML = `<tr><td colspan="17" style="color:var(--muted)">해당 없음</td></tr>`;
+  if (!tb.children.length) tb.innerHTML = `<tr><td colspan="18" style="color:var(--muted)">해당 없음</td></tr>`;
+  updateBulkSelection();
 }
 let liveStudents = [], liveResults = {}, liveSelected = '', liveBusy = false;
 async function loadLiveLinks() {
@@ -1725,13 +1857,20 @@ function liveMatrixRows() {
 }
 async function loadAllLive() {
   if (liveBusy) return; liveBusy = true; liveResults = {};
+  $('liveProgress').textContent = `0/${liveStudents.length} 불러오는 중입니다`;
   try {
-    for (const [i,s] of liveStudents.entries()) {
-      $('liveProgress').textContent = `${i+1}/${liveStudents.length} ${s.name || ''} 불러오는 중입니다`;
-      try { liveResults[s.id] = await fetchLive(s.id); }
-      catch { /* Continue with the next student; missing results are visible in the matrix. */ }
-      $('liveMatrix').innerHTML = liveTable(liveMatrixRows());
+    let next = 0, completed = 0;
+    async function worker() {
+      while (next < liveStudents.length) {
+        const s = liveStudents[next++];
+        try { liveResults[s.id] = await fetchLive(s.id); }
+        catch { /* A failed student must not stop the pool. */ }
+        completed++;
+        $('liveProgress').textContent = `${completed}/${liveStudents.length} ${s.name || ''} 불러오는 중입니다`;
+        $('liveMatrix').innerHTML = liveTable(liveMatrixRows());
+      }
     }
+    await Promise.all(Array.from({length:Math.min(4,liveStudents.length)},worker));
     $('liveProgress').textContent = `${Object.keys(liveResults).length}/${liveStudents.length}명 불러왔습니다`;
   } finally { liveBusy = false; }
 }
@@ -2119,13 +2258,13 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   document.querySelectorAll('.areas button').forEach(x => { x.classList.toggle('active', x.dataset.area === b.dataset.group); x.setAttribute('aria-pressed', String(x.dataset.area === b.dataset.group)); });
   history.replaceState(null, '', '#' + b.dataset.page);
   try { localStorage.setItem("adm_tab", b.dataset.page); } catch {}
-  if (b.dataset.page === "finance") loadFinanceSummary();
-  if (b.dataset.page === "payments") loadPayments().catch((e) => toast(safeError()));
-  if (b.dataset.page === "rebate") loadRebate().catch((e) => toast("리베이트 불러오기 실패: " + safeError()));
-  if (b.dataset.page === "live-sales") loadLiveLinks().catch(() => toast(safeError()));
+  if (b.dataset.page === "finance") cachedTab("finance", () => loadFinanceSummary());
+  if (b.dataset.page === "payments") cachedTab("payments", () => loadPayments()).catch((e) => toast(safeError()));
+  if (b.dataset.page === "rebate") cachedTab("rebate", () => loadRebate()).catch((e) => toast("리베이트 불러오기 실패: " + safeError()));
+  if (b.dataset.page === "live-sales") cachedTab("live-sales", () => loadLiveLinks()).catch(() => toast(safeError()));
   if (b.dataset.page === "sales") renderSales();
-  if (b.dataset.page === "activity") { loadActivity().catch((e) => toast(safeError())); loadActivityTrend().catch((e) => toast(safeError())); loadCoupangStats().catch((e) => toast(safeError())); }
-  if (b.dataset.page === "log") loadLog().catch((e) => toast(safeError()));
+  if (b.dataset.page === "activity") { cachedTab("activity", () => Promise.all([loadActivity(),loadActivityTrend(),loadCoupangStats()])).catch(() => toast(safeError())); }
+  if (b.dataset.page === "log") cachedTab("log", () => loadLog()).catch((e) => toast(safeError()));
 }));
 window.addEventListener('hashchange', () => gotoTab(location.hash.slice(1).replace(/^page-/, '')));
 $("password").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
