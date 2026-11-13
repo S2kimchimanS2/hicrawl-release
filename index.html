@@ -120,6 +120,7 @@
   @keyframes barGrow { from { transform:scaleY(0); } to { transform:scaleY(1); } }
   .chart-legend { display:flex;gap:16px;flex-wrap:wrap; }.chart-tip { position:fixed;z-index:50;background:#493a53;color:white;padding:10px;border-radius:12px;pointer-events:none;white-space:pre-line; }
   @media(max-width:639px) { .tabs { flex-wrap:nowrap;overflow-x:auto;scroll-snap-type:x mandatory; }.tabs button { flex:none;white-space:nowrap;scroll-snap-align:start; }.tbl-wrap table:not(#users) th:first-child,.tbl-wrap table:not(#users) td:first-child { position:sticky;left:0;background:var(--panel);z-index:1; }.tbl-wrap table:not(#users) th:first-child { z-index:3; }.tbl-wrap:has(> .finance-months) { max-height:none; }.finance-months thead { display:none; }.finance-months,.finance-months tbody { display:block; }.finance-months tr { display:block;padding:12px;margin:8px;border:1px solid var(--line);border-radius:16px; }.finance-months td,.finance-months th { display:flex;justify-content:space-between;position:static!important;white-space:normal; }.finance-months td::before { content:attr(data-label);color:var(--muted); } }
+#taxTable {width:100%;min-width:700px;table-layout:fixed} #taxTable th,#taxTable td {white-space:normal;overflow-wrap:anywhere} #taxTable th:last-child {width:26%} #taxTable .btn {font-size:11px;padding:4px 6px;margin:3px 2px 0 0} #taxTable .tax-actions {margin-top:6px;display:flex;flex-wrap:wrap} #taxTable .tax-stale {white-space:normal;color:#c0392b} #taxTable th:first-child,#taxTable td:first-child {position:sticky;left:0;background:var(--panel);z-index:1}
 </style>
 </head>
 <body>
@@ -168,6 +169,7 @@
       <button data-page="users" data-group="students" class="active">수강생 목록</button>
       <button data-page="activity" data-group="students" >수강생 활동</button>
       <button data-page="usage" data-group="students">📊 사용 현황</button>
+      <button data-page="tax-invoices" data-group="money" hidden>🧾 세금계산서</button>
       <button data-page="course-receipts" data-group="money" hidden>🎓 강의 입금</button>
       <button data-page="finance" data-group="money" class="" hidden>요약</button>
       <button data-page="deposits" data-group="money" class="" hidden>입금 확인 → 자동 연장</button>
@@ -179,6 +181,13 @@
       <button data-page="incidents" data-group="operations" class="" hidden>클라이언트 사고 (읽기 전용)</button>
       <button data-page="config" data-group="settings" class="" hidden>앱 설정 배포</button>
     </div>
+<section class="page" id="page-tax-invoices"><div class="card"><h2>🧾 세금계산서</h2>
+<p>받은 입금마다 세금계산서를 발급해야 합니다.</p><div id="taxCounts" aria-live="polite"></div>
+<label><input id="taxAuto" type="checkbox" onchange="saveTaxSettings()"> 매일 <select id="taxHour" aria-label="자동 발급 시각" onchange="saveTaxSettings()"></select>시 자동 발급</label> <strong id="taxAutoState">꺼짐</strong> <label>발급 대상: <input id="taxStartOn" type="date" onchange="saveTaxSettings()"> 이후 입금</label>
+<p class="muted">자동 발급은 Hermes가 매일 지정 시각에 홈택스에서 대기 건을 발급합니다 (연결 준비 중).</p>
+<button class="btn primary" onclick="requestTaxAll()">발급 필요 전체 자동 발급</button>
+</div><div class="card"><div class="row" id="taxFilters"></div><label>조회 월 <select id="taxMonth" onchange="renderTaxInvoices()"><option value="">전체</option></select></label>
+<div class="tbl-wrap"><table id="taxTable"><thead><tr><th>입금일/월</th><th>구분</th><th>이름</th><th>금액</th><th>공급받는자</th><th>상태 / 작업</th></tr></thead><tbody id="taxRows"></tbody></table></div></div></section>
 <section class="page" id="page-course-receipts"><div class="card"><h2>🎓 강의 입금</h2>
 <form id="courseForm" onsubmit="saveCourseReceipt(event)"><div class="form-grid">
 <label>입금일<input id="courseDate" type="date" required></label>
@@ -671,7 +680,7 @@ try { $("sbUrl").value = localStorage.getItem("sb_url") || ""; $("sbKey").value 
 if (!$("sbUrl").value) $("sbUrl").value = DEFAULT_SB_URL;
 if (!$("sbKey").value) $("sbKey").value = DEFAULT_SB_KEY;
 async function rpc(name, params = {}) {
-  const mutation = /^admin_/.test(name) && !["admin_course_receipt_list","admin_usage_summary","admin_finance_summary","admin_ledger_links","admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
+  const mutation = /^admin_/.test(name) && !["admin_tax_invoices","admin_course_receipt_list","admin_usage_summary","admin_finance_summary","admin_ledger_links","admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
   if (mutation && !requireFresh("core")) throw Error("stale");
   if (mutation) { mutationPending = true; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
   try {
@@ -1682,6 +1691,62 @@ async function zeroSales(uid, pm) {
     toast("매출 0원 완료"); await loadRebate();
   } catch { toast("처리 실패: " + safeError()); }
 }
+let taxRows=[], taxFilter='';
+async function loadTaxInvoices() {
+  try {
+    const data=await rpc('admin_tax_invoices',{p_status:null,p_month:null});
+    taxRows=data.rows||[];
+    const s=data.settings||{}, c=data.counts||{};
+    $('taxHour').innerHTML=Array.from({length:24},(_,i)=>`<option value="${i}">${i}</option>`).join('');
+    $('taxStartOn').value=s.start_on||'2026-11-01';
+    $('taxHour').value=s.auto_hour??10; $('taxAuto').checked=!!s.auto_enabled;
+    $('taxAutoState').textContent=s.auto_enabled?'켜짐':'꺼짐';
+    $('taxCounts').textContent=`🔴 발급 필요 ${c.needed||0} · ⚠ 정보 부족 ${c.missing_info||0} · ⏳ 대기/발급중 ${c.queued||0} · ✅ 오늘 발급 ${c.issued_today||0} · ❌ 실패 ${c.failed||0}`;
+    const month=$('taxMonth').value;
+    $('taxMonth').innerHTML='<option value="">전체</option>'+[...new Set(taxRows.map(r=>r.received_month).filter(Boolean))].sort().reverse().map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('');
+    $('taxMonth').value=month; renderTaxInvoices();
+  } catch { $('taxRows').textContent='세금계산서 불러오기 실패'; }
+}
+function renderTaxInvoices() {
+  const filters=[['','전체'],['needed','발급 필요'],['missing_info','정보 부족'],['issued','발급 완료'],['failed','실패']];
+  $('taxFilters').innerHTML=filters.map(([v,l])=>`<button class="btn ${taxFilter===v?'primary':'ghost'}" data-tax-filter="${v}">${l}</button>`).join('');
+  $('taxFilters').querySelectorAll('button').forEach(b=>b.onclick=()=>{taxFilter=b.dataset.taxFilter;renderTaxInvoices();});
+  const rows=taxRows.filter(r=>(!$('taxMonth').value||r.received_month===$('taxMonth').value)&&(!taxFilter||r.status===taxFilter||(taxFilter==='missing_info'&&r.missing_info&&['needed','failed'].includes(r.status))));
+  const labels={rebate:'리베이트',program:'프로그램비',asep:'에이셉',course:'강의'};
+  $('taxRows').innerHTML=rows.map(r=>{
+    const editable=['needed','failed'].includes(r.status), missing=r.missing_info&&editable;
+    const label={needed:missing?'⚠ 정보 부족':'🔴 발급 필요',queued:'⏳ 대기',issuing:'🔄 발급 중',issued:'✅ 발급 완료',failed:'❌ 실패',skipped:'건너뜀'}[r.status];
+    return `<tr><td>${esc(r.received_on||r.received_month||'')}</td><td>${esc(labels[r.source_kind]||r.source_kind)}</td><td>${esc(r.who)}</td><td class="num">${won(r.amount)}</td><td>${esc(r.buyer_trade_name||'정보 부족')}<br>${esc(r.buyer_biz_number||'')}${missing?'<p class="muted">정보 입력 버튼으로 직접 채우거나 학생에게 요청</p>':''}${missing&&['rebate','program'].includes(r.source_kind)&&r.user_id?`<button class="btn ghost" data-tax-student="${esc(r.user_id)}">수강생 정보</button>`:''}</td><td><span class="tag ${r.status==='issued'?'ok':r.status==='failed'?'err':'warn'}">${esc(label)}</span>${r.status==='issued'?`<br>${esc(r.approval_no)}<br>발급일 ${esc(r.issue_date)}`:''}${r.status==='failed'?`<br>${esc(r.last_error)}`:''}${r.status==='skipped'?`<br>${esc(r.memo)}`:''}${r.stale?'<p class="tax-stale">2시간 넘게 발급 중 — 홈택스에서 발급됐는지 직접 확인</p>':''}<div class="tax-actions">${editable?`<button class="btn ghost" data-tax-buyer="${esc(r.id)}">${missing?'정보 입력':'공급받는자 수정'}</button><button class="btn ghost" data-tax-request="${esc(r.id)}" ${missing?'disabled title="사업자 정보 부족"':''}>자동 발급</button><button class="btn ghost" data-tax-mark="${esc(r.id)}">직접 발급함</button><button class="btn ghost" data-tax-skip="${esc(r.id)}">건너뛰기</button>`:''}</div></td></tr>`;
+  }).join('')||'<tr><td colspan="6">해당 내역 없음</td></tr>';
+  $('taxRows').querySelectorAll('[data-tax-buyer]').forEach(b=>b.onclick=()=>editTaxBuyer(b.dataset.taxBuyer));
+  $('taxRows').querySelectorAll('[data-tax-request]').forEach(b=>b.onclick=()=>requestTax([b.dataset.taxRequest]));
+  $('taxRows').querySelectorAll('[data-tax-mark]').forEach(b=>b.onclick=async()=>{const no=prompt('홈택스 승인번호를 입력하세요');if(no?.trim()) await taxMutation('admin_tax_invoice_mark',{p_id:b.dataset.taxMark,p_status:'issued',p_approval_no:no.trim(),p_error:null});});
+  $('taxRows').querySelectorAll('[data-tax-skip]').forEach(b=>b.onclick=async()=>{const reason=prompt('건너뛰기 사유');if(reason?.trim()) await taxMutation('admin_tax_invoice_skip',{p_id:b.dataset.taxSkip,p_reason:reason.trim()});});
+  $('taxRows').querySelectorAll('[data-tax-student]').forEach(b=>b.onclick=()=>studentModal(b.dataset.taxStudent));
+}
+async function editTaxBuyer(id) {
+  const row=taxRows.find(r=>String(r.id)===String(id));
+  const args={p_id:id};
+  for(const [key,label,value] of [['p_biz','사업자번호',row.buyer_biz_number],['p_trade','상호',row.buyer_trade_name],['p_ceo','대표자',row.buyer_ceo_name],['p_email','이메일',row.buyer_email]]) {
+    const answer=prompt(label,value||''); if(answer===null) return; args[key]=answer;
+  }
+  await taxMutation('admin_tax_invoice_set_buyer',args);
+}
+async function taxMutation(name,args) {
+  try { const result=await rpc(name,args); if(result.ok===false) throw new Error('처리 실패');
+    const refused=(result.results||[]).filter(r=>!r.ok); if(refused.length) toast(refused.map(r=>r.reason).join(' · '));
+  } catch { toast('처리 실패: '+safeError()); }
+  await reloadAll(false);
+  await loadTaxInvoices();
+}
+async function saveTaxSettings() { await taxMutation('admin_tax_invoice_settings_set',{p_enabled:$('taxAuto').checked,p_hour:Number($('taxHour').value),p_start_on:$('taxStartOn').value}); }
+async function requestTax(ids) {
+  const rows=taxRows.filter(r=>ids.map(String).includes(String(r.id)));
+  if(!rows.length) {toast('발급할 건이 없습니다');return;}
+  if(confirm(`${rows.length}건 · ${won(rows.reduce((sum,r)=>sum+BigInt(r.amount),0n))} 자동 발급을 요청할까요?`)) await taxMutation('admin_tax_invoice_request',{p_ids:ids});
+}
+function requestTaxAll() { return requestTax(taxRows.filter(r=>r.status==='needed'&&!r.missing_info).map(r=>r.id)); }
+
 let courseReceipts = [];
 async function loadCourseReceipts() {
   if (!$('courseDate').value) $('courseDate').value = [new Date().getFullYear(),String(new Date().getMonth()+1).padStart(2,'0'),String(new Date().getDate()).padStart(2,'0')].join('-');
@@ -2417,6 +2482,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   history.replaceState(null, '', '#' + b.dataset.page);
   try { localStorage.setItem("adm_tab", b.dataset.page); } catch {}
   if (b.dataset.page === "usage") cachedTab("usage", loadUsage).catch(() => {});
+  if (b.dataset.page === "tax-invoices") loadTaxInvoices();
   if (b.dataset.page === "course-receipts") loadCourseReceipts();
   if (b.dataset.page === "finance") cachedTab("finance", () => loadFinanceSummary());
   if (b.dataset.page === "payments") cachedTab("payments", () => loadPayments()).catch((e) => toast(safeError()));
