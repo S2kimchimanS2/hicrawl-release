@@ -170,7 +170,7 @@
       <button data-page="deposits" data-group="money" class="" hidden>입금 확인 → 자동 연장</button>
       <button data-page="payments" data-group="money" class="" hidden>결제/이용권 기록</button>
       <button data-page="rebate" data-group="money" class="" hidden>리베이트 정산</button>
-      <button data-page="live-sales" data-group="money" class="" hidden>실시간 월별 매출</button>
+      <button data-page="live-sales" data-group="money" class="" hidden>📒 장부 매출(자동)</button>
       <button data-page="sales" data-group="money" class="" hidden>매출 현황</button>
       <button data-page="log" data-group="operations" class="" hidden>작업 로그</button>
       <button data-page="incidents" data-group="operations" class="" hidden>클라이언트 사고 (읽기 전용)</button>
@@ -392,15 +392,19 @@
     <!-- 로그 -->
     <!-- 매출 현황 -->
     <div class="page" id="page-live-sales">
-      <h2>실시간 월별 매출</h2>
+      <h2>📒 장부 매출(자동)</h2>
       <p>지난 장부까지 읽기 전용으로 확인합니다. 겹친 월은 매출이 큰 장부를 선택하고 표시합니다.</p>
-      <select id="liveStudent"></select>
-      <button class="btn" onclick="loadLiveStudent()">불러오기</button>
-      <button class="btn" onclick="loadAllLive()">모든 수강생 불러오기</button>
+      <div class="row"><span id="liveUpdated" class="muted"></span>
+      <button id="liveRefresh" class="btn sm ghost" onclick="loadAllLive()">지금 새로고침</button>
       <button class="btn ghost" onclick="liveCsv(false)">월별 CSV</button>
-      <button class="btn ghost" onclick="liveCsv(true)">전체 수강생 CSV</button>
-      <p id="liveProgress"></p><div id="liveStudents"></div><div id="liveStatus"></div>
-      <div style="overflow:auto" id="liveDetail"></div><div style="overflow:auto" id="liveMatrix"></div>
+      <button class="btn ghost" onclick="liveCsv(true)">전체 수강생 CSV</button></div>
+      <p id="liveProgress" aria-live="polite"></p>
+      <div class="card"><div class="tbl-wrap" id="liveSummary"></div></div>
+      <h3>월별 수강생 비교</h3>
+      <label>보여줄 값 <select id="liveMetric" onchange="renderLiveOverview()"><option value="sales">매출</option><option value="profit">순익</option></select></label>
+      <div class="tbl-wrap" id="liveMatrix"></div>
+      <h3 id="liveDetailTitle">수강생을 누르면 월별 상세를 확인할 수 있습니다</h3>
+      <div id="liveStatus"></div><div class="tbl-wrap" id="liveDetail"></div>
     </div>
     <div class="page" id="page-sales">
       <div class="card">
@@ -1820,12 +1824,60 @@ function renderRebate() {
   updateBulkSelection();
 }
 let liveStudents = [], liveResults = {}, liveSelected = '', liveBusy = false;
+const liveCacheKey = 'hicrawl.ledgerAuto.v1', liveMaxAge = 30 * 60 * 1000;
+let liveFailed = new Set();
+const liveHasLink = s => !!(s.ledger_url?.trim() || s.ledger_history_urls?.trim());
+function liveSafeResult(data, fetchedAt) {
+  const merged = {};
+  for (const [month,v] of Object.entries(data.merged || {})) {
+    if (!/^\d{4}-\d{2}$/.test(month)) continue;
+    merged[month] = {sales:Number(v.sales)||0,profit:Number(v.profit)||0,days:Number(v.days)||0,overlap:!!v.overlap};
+  }
+  return {merged, sheets:(data?.sheets || []).map(s=>({index:Number(s.index)||0,
+    sheet_id_suffix:String(s.sheet_id_suffix || '').slice(-6),ok:!!s.ok,
+    error:s.ok ? '' : liveSheetError(s.error)})), fetchedAt};
+}
+function liveSheetError(error) {
+  if ((String(error).includes('공유되지') || error === '공유 안 됨')) return '공유 안 됨';
+  if ((String(error).includes('탭이 없습니다') || error === '탭 없음')) return '탭 없음';
+  return '읽기 실패';
+}
+function saveLiveCache() {
+  try { localStorage.setItem(liveCacheKey,JSON.stringify(Object.fromEntries(liveStudents
+    .filter(s=>liveHasLink(s) && liveResults[s.id]).map(s=>[s.id,liveSafeResult(liveResults[s.id],liveResults[s.id].fetchedAt)])))); } catch {}
+}
 async function loadLiveLinks() {
+  if (liveBusy) return;
   const data = await rpc('admin_ledger_links');
   liveStudents = (data.users || []).filter(s => !s.is_admin);
-  const count = s => new Set([s.ledger_url,s.ledger_history_urls].filter(Boolean).join(',').split(',').filter(Boolean).map(u=>u.match(/\/d\/([^/?#]+)/)?.[1] || u)).size;
-  $('liveStudent').innerHTML = liveStudents.map(s=>`<option value="${esc(s.id)}">${esc(s.student_code || '')} ${esc(s.name || '')} (${count(s)}개)</option>`).join('');
-  $('liveStudents').innerHTML = liveStudents.map(s=>`<div>${esc(s.student_code || '')} ${esc(s.name || '')}: ${count(s)}개</div>`).join('');
+  let cache = {}; try { cache = JSON.parse(localStorage.getItem(liveCacheKey) || '{}') || {}; } catch {}
+  liveResults = {};
+  for (const s of liveStudents) if (liveHasLink(s) && cache[s.id]) {
+    try { liveResults[s.id] = liveSafeResult(cache[s.id],Number(cache[s.id].fetchedAt)||0); } catch {}
+  }
+  liveFailed = new Set(liveStudents.filter(s=>liveResults[s.id] && !liveResults[s.id].sheets.some(x=>x.ok)).map(s=>s.id));
+  renderLiveOverview();
+  if (liveStudents.some(s=>liveHasLink(s) && (!liveResults[s.id] || Date.now()-liveResults[s.id].fetchedAt >= liveMaxAge))) await loadAllLive();
+}
+function renderLiveOverview() {
+  const now = ymNow(), prev = ymAdd(now,-1), totals = [0,0,0,0,0,0];
+  const sorted = [...liveStudents].sort((a,b)=>(liveResults[b.id]?.merged[now]?.sales || 0)-(liveResults[a.id]?.merged[now]?.sales || 0));
+  const headers = ['수강생','이번 달 매출','이번 달 순익','지난달 매출','지난달 순익','올해 누적 매출','올해 누적 순익','장부 상태'];
+  $('liveSummary').innerHTML = '<table><thead><tr>'+headers.map(h=>`<th>${h}</th>`).join('')+'</tr></thead><tbody>'+sorted.map(s=>{
+    const d = liveResults[s.id], months = d?.merged || {};
+    const values = [months[now]?.sales||0,months[now]?.profit||0,months[prev]?.sales||0,months[prev]?.profit||0,
+      ...['sales','profit'].map(k=>Object.entries(months).filter(([m])=>m.startsWith(now.slice(0,4)) && m<=now).reduce((sum,[,v])=>sum+(v[k]||0),0))];
+    values.forEach((v,i)=>totals[i]+=v);
+    const sheets = d?.sheets || [], read = sheets.filter(x=>x.ok).length;
+    const state = !liveHasLink(s) ? '장부 미등록' : [read ? `읽음 ${read}개` : '',...new Set(sheets.filter(x=>!x.ok).map(x=>x.error))].filter(Boolean).join(' · ') || (liveFailed.has(s.id) ? '읽기 실패' : '확인 중');
+    return `<tr data-live-id="${esc(s.id)}"><td><button class="btn ghost sm" data-live-detail="${esc(s.id)}">${avatar(s)}${esc(s.name||'')} <small>${esc(s.student_code||'')}</small></button></td>`+values.map(v=>`<td class="num">${d ? v.toLocaleString()+'원' : '—'}</td>`).join('')+`<td><span class="tag">${esc(state)}</span>${liveFailed.has(s.id)&&d ? ' <small>이전 값</small>' : ''}</td></tr>`;
+  }).join('')+'</tbody><tfoot><tr><th>합계</th>'+totals.map(v=>`<td class="num">${v.toLocaleString()}원</td>`).join('')+'<td></td></tr></tfoot></table>';
+  $('liveSummary').querySelectorAll('[data-live-id]').forEach(row=>row.onclick=()=>renderLive(row.dataset.liveId));
+  $('liveMatrix').innerHTML = liveTable(liveMatrixRows());
+  $('liveMatrix').querySelectorAll('tr').forEach((row,i)=>{ if (i>0) { row.style.cursor='pointer'; row.onclick=()=>renderLive(liveStudents[i-1].id); } });
+  const times = Object.values(liveResults).map(d=>d.fetchedAt).filter(Boolean);
+  $('liveUpdated').textContent = times.length ? '마지막 갱신 '+new Date(Math.min(...times)).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',hour12:false}) : '아직 갱신하지 않았습니다';
+  if (liveSelected) renderLive(liveSelected);
 }
 async function fetchLive(id) {
   const {data,error} = await sb.functions.invoke('ledger-monthly',{body:{user_id:id}});
@@ -1853,47 +1905,50 @@ function liveDetailRows(id) {
 function liveTable(rows) { return '<table><tbody>'+rows.map(row=>'<tr>'+row.map(v=>`<td>${esc(String(v))}</td>`).join('')+'</tr>').join('')+'</tbody></table>'; }
 function renderLive(id) {
   liveSelected = id; const data = liveResults[id];
+  $('liveDetailTitle').textContent = (liveStudents.find(s=>s.id===id)?.name || '')+' · 월별 상세';
   $('liveDetail').innerHTML = liveTable(liveDetailRows(id));
-  $('liveStatus').innerHTML = (data.sheets || []).map(s=>`<div>장부 ${esc(String(s.index))} (${esc(s.sheet_id_suffix)}): ${esc(s.ok ? '읽었습니다' : s.error)} · 건너뛴 행 ${esc(String(s.skipped_rows))}</div>`).join('');
-}
-async function loadLiveStudent() {
-  if (liveBusy || !$('liveStudent').value) return;
-  liveBusy = true; const id = $('liveStudent').value; $('liveProgress').textContent = '불러오는 중입니다';
-  try { liveResults[id] = await fetchLive(id); renderLive(id); $('liveProgress').textContent = '불러왔습니다'; }
-  catch { $('liveProgress').textContent = '불러오지 못했습니다. 다시 시도해주세요'; }
-  finally { liveBusy = false; }
+  $('liveStatus').innerHTML = (data?.sheets || []).map(s=>`<div>장부 ${esc(String(s.index))} (${esc(s.sheet_id_suffix)}): ${esc(s.ok ? '읽었습니다' : s.error)}</div>`).join('');
 }
 function liveMatrixRows() {
   const months = liveMonths(Object.values(liveResults));
   return [['코드','수강생',...months,'합계'],...liveStudents.map(s=>{
-    const data = liveResults[s.id]; const values = months.map(m=>data ? (data.merged[m]?.sales || 0) : '');
-    return [s.student_code || '',s.name || '',...values,data ? values.reduce((a,v)=>a+Number(v),0) : '불러오지 못했습니다'];
+    const data = liveResults[s.id]; const values = months.map(m=>data ? (data.merged[m]?.[$('liveMetric').value === 'profit' ? 'profit' : 'sales'] || 0) : '');
+    return [s.student_code || '',s.name || '',...values,data ? values.reduce((a,v)=>a+Number(v),0) : liveHasLink(s) ? '불러오지 못했습니다' : '장부 미등록'];
   })];
 }
 async function loadAllLive() {
-  if (liveBusy) return; liveBusy = true; liveResults = {};
+  if (liveBusy) return; liveBusy = true;
+  $('liveRefresh').disabled = true; liveFailed = new Set();
   $('liveProgress').textContent = `0/${liveStudents.length} 불러오는 중입니다`;
   try {
     let next = 0, completed = 0;
     async function worker() {
       while (next < liveStudents.length) {
         const s = liveStudents[next++];
-        try { liveResults[s.id] = await fetchLive(s.id); }
-        catch { /* A failed student must not stop the pool. */ }
+        try {
+          if (!liveHasLink(s)) { delete liveResults[s.id]; }
+          else {
+            const data = await fetchLive(s.id);
+            if ((data.sheets || []).length && !data.sheets.some(sheet=>sheet.ok) && liveResults[s.id]) {
+              liveFailed.add(s.id); liveResults[s.id].sheets = liveSafeResult(data,0).sheets;
+            } else liveResults[s.id] = liveSafeResult(data,Date.now());
+          }
+        }
+        catch { liveFailed.add(s.id); }
         completed++;
         $('liveProgress').textContent = `${completed}/${liveStudents.length} ${s.name || ''} 불러오는 중입니다`;
-        $('liveMatrix').innerHTML = liveTable(liveMatrixRows());
+        renderLiveOverview(); saveLiveCache();
       }
     }
     await Promise.all(Array.from({length:Math.min(4,liveStudents.length)},worker));
     $('liveProgress').textContent = `${Object.keys(liveResults).length}/${liveStudents.length}명 불러왔습니다`;
-  } finally { liveBusy = false; }
+  } finally { liveBusy = false; $('liveRefresh').disabled = false; }
 }
 function liveCsv(matrix) {
   const rows = matrix ? liveMatrixRows() : liveDetailRows(liveSelected);
   const csv = rows.map(row=>row.map(v=>'"'+String(v).replace(/^[=+@-]/,"'"+'$&').replace(/"/g,'""')+'"').join(',')).join('\n');
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'}));
-  a.download = matrix ? '실시간_전체매출.csv' : '실시간_월별매출.csv'; a.click(); URL.revokeObjectURL(a.href);
+  a.download = matrix ? `장부_전체${$('liveMetric').value === 'profit' ? '순익' : '매출'}.csv` : '실시간_월별매출.csv'; a.click(); URL.revokeObjectURL(a.href);
 }
 
 // ── 매출 현황 (리베이트 제출 값을 기준월로 모아서 보여줌 — 새 서버 호출 없이 rbData 재사용) ──
@@ -2321,7 +2376,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   if (b.dataset.page === "finance") cachedTab("finance", () => loadFinanceSummary());
   if (b.dataset.page === "payments") cachedTab("payments", () => loadPayments()).catch((e) => toast(safeError()));
   if (b.dataset.page === "rebate") cachedTab("rebate", () => loadRebate()).catch((e) => toast("리베이트 불러오기 실패: " + safeError()));
-  if (b.dataset.page === "live-sales") cachedTab("live-sales", () => loadLiveLinks()).catch(() => toast(safeError()));
+  if (b.dataset.page === "live-sales") loadLiveLinks().catch(() => toast(safeError()));
   if (b.dataset.page === "sales") renderSales();
   if (b.dataset.page === "activity") { cachedTab("activity", () => Promise.all([loadActivity(),loadActivityTrend(),loadCoupangStats()])).catch(() => toast(safeError())); }
   if (b.dataset.page === "log") cachedTab("log", () => loadLog()).catch((e) => toast(safeError()));
