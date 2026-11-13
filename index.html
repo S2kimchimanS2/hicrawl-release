@@ -165,6 +165,7 @@
     <div class="tabs" aria-label="세부 메뉴">
       <button data-page="users" data-group="students" class="active">수강생 목록</button>
       <button data-page="activity" data-group="students" >수강생 활동</button>
+      <button data-page="usage" data-group="students">📊 사용 현황</button>
       <button data-page="finance" data-group="money" class="" hidden>요약</button>
       <button data-page="deposits" data-group="money" class="" hidden>입금 확인 → 자동 연장</button>
       <button data-page="payments" data-group="money" class="" hidden>결제/이용권 기록</button>
@@ -177,6 +178,20 @@
     </div>
     <div class="page" id="page-finance"><div class="card"><h2>💰 돈 관리 요약</h2><div id="financeSummary" aria-live="polite"></div></div></div>
 
+    <section class="page" id="page-usage">
+      <div class="card">
+        <h2>📊 사용 현황 <small class="muted">— 최근 접속 · 작업 통계 · 기능 사용 횟수</small></h2>
+        <div class="row"><select id="usageDays" aria-label="사용 현황 기간" onchange="refreshUsage()"><option value="7">최근 7일</option><option value="30" selected>최근 30일</option><option value="180">최근 180일</option></select>
+        <button class="btn ghost sm" onclick="refreshUsage()">새로고침</button></div>
+        <p class="muted">0.1.110 이상 앱의 집계입니다. 원본 상품·주소·계정키는 수집하지 않습니다. 미접속 또는 이전 버전은 표시되지 않습니다.</p>
+        <div id="usageMsg" class="msg" role="status"></div>
+        <div class="tbl-wrap"><table id="usageTable"><thead><tr><th>수강생</th><th>최근 접속 / 버전</th><th>활동일</th><th>사용 시간(분)</th><th>크롤링 / 평균(초)</th><th>쿠팡 성공 / 실패 / 보류</th><th>자세히</th></tr></thead><tbody></tbody></table></div>
+      </div>
+    </section>
+    <dialog id="usageDrawer" aria-labelledby="usageTitle" style="margin:0 0 0 auto;height:100%;max-height:100%;width:min(540px,100vw);box-sizing:border-box;border:0;border-radius:24px 0 0 24px;padding:28px;background:#faf8ff;color:#352e45;overflow:auto">
+      <button class="btn ghost sm" onclick="document.getElementById('usageDrawer').close()">닫기</button>
+      <h2 id="usageTitle"></h2><div id="usageDetail"></div>
+    </dialog>
     <!-- 수강생 -->
     <div class="page active" id="page-users">
       <div class="card">
@@ -640,7 +655,7 @@ try { $("sbUrl").value = localStorage.getItem("sb_url") || ""; $("sbKey").value 
 if (!$("sbUrl").value) $("sbUrl").value = DEFAULT_SB_URL;
 if (!$("sbKey").value) $("sbKey").value = DEFAULT_SB_KEY;
 async function rpc(name, params = {}) {
-  const mutation = /^admin_/.test(name) && !["admin_finance_summary","admin_ledger_links","admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
+  const mutation = /^admin_/.test(name) && !["admin_usage_summary","admin_finance_summary","admin_ledger_links","admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
   if (mutation && !requireFresh("core")) throw Error("stale");
   if (mutation) { mutationPending = true; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
   try {
@@ -926,7 +941,7 @@ function renderUsers() {
     const lp = u.last_payment;
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${esc(u.email)}</td><td class="user-name">${avatar(u)}${esc(u.name || "")}${u.student_code ? ` <small class="muted">[${esc(u.student_code)}]</small>` : ""}</td><td>${esc(u.deposit_name || "")}</td><td><span class="tag ${cls}">${st}</span></td>
+      <td>${esc(u.email)}</td><td class="user-name">${avatar(u)}${esc(u.name || "")}${usageStudentHint(u.id)}${u.student_code ? ` <small class="muted">[${esc(u.student_code)}]</small>` : ""}</td><td>${esc(u.deposit_name || "")}</td><td><span class="tag ${cls}">${st}</span></td>
       <td>${u.active_until || "-"}</td>
       <td class="num">${num(u.quota_monthly)}</td><td class="num">${num(u.quota_used)}</td><td class="num">${num(u.quota_extra)}</td>
       <td class="num"><b>${num(left)}</b></td>
@@ -2249,6 +2264,50 @@ function saveRules() {
   $("rulesMsg").textContent = ""; setConfig("crawler_rules", v, "파싱 규칙");
 }
 
+// Usage shares tab caching and ignores stale period responses.
+let usageStudents = [], usageRequest = 0;
+async function refreshUsage() {
+  tabCache.delete('usage');
+  return cachedTab('usage', loadUsage).catch(() => {});
+}
+async function loadUsage() {
+  const request = ++usageRequest;
+  $('usageMsg').textContent = '사용 현황 불러오는 중…';
+  try {
+    const data = await rpc('admin_usage_summary', {p_days:Number($('usageDays').value)});
+    if (request !== usageRequest) return;
+    if (data?.ok !== true || !Array.isArray(data.students)) throw Error('usage');
+    usageStudents = data.students;
+    const tb = $('usageTable').tBodies[0]; tb.replaceChildren();
+    usageStudents.forEach((u,i) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${avatar(u)}${esc(u.name || '이름 없음')}</td><td>${esc((u.last_seen || '').slice(0,16).replace('T',' '))}<br><span class="tag">${esc(u.device?.version || '-')}</span></td><td>${esc(u.days_active)}</td><td>${esc(u.session_minutes)}</td><td>${esc(u.crawl_jobs)} / ${esc(u.crawl_avg_seconds ?? '-')}</td><td>${esc(u.upload_ok)} / ${esc(u.upload_failed)} / ${esc(u.upload_hold)}</td><td><button class="btn ghost sm" data-usage-index="${i}">자세히</button></td>`;
+      tr.querySelector('button').onclick = () => usageDetail(i);
+      tb.appendChild(tr);
+    });
+    $('usageMsg').textContent = usageStudents.length ? `${usageStudents.length}명 · UTC 기준 · 약 5분 간격 집계` : '이 기간의 사용 기록이 없습니다.';
+    renderUsers();
+  } catch {
+    if (request !== usageRequest) return;
+    tabCache.delete('usage');
+    usageStudents = []; $('usageTable').tBodies[0].replaceChildren();
+    $('usageMsg').textContent = '사용 현황을 불러오지 못했습니다. 새로고침으로 다시 시도하세요.';
+  }
+}
+function usageStudentHint(id) {
+  const u = usageStudents.find(x => x.user_id === id);
+  return u ? `<br><small class="muted">${esc((u.last_seen || '').slice(0,16).replace('T',' '))} · ${esc(u.device?.version || '-')}</small>` : '';
+}
+function usageDetail(index) {
+  const u = usageStudents[index]; if (!u) return;
+  $('usageTitle').textContent = u.name || '수강생 사용 현황';
+  const d = u.device || {};
+  const labels = {features:'자주 사용한 기능',crawl_reasons:'크롤링 실패 유형',upload_errors:'쿠팡 오류 유형',categories:'분류 코드별 수집'};
+  $('usageDetail').innerHTML = `<p><span class="tag">${esc(d.version || '-')}</span> ${esc(d.os || '-')} · CPU ${esc(d.cpu || '-')} · RAM ${esc(d.ram || '-')} GB · 화면 ${esc(d.screen || '-')}</p><p>활동 ${esc(u.days_active)}일 · ${esc(u.session_minutes)}분</p><p>크롤링 발견 ${esc(u.crawl_found)} · 성공 ${esc(u.crawl_ok)} · 실패 ${esc(u.crawl_failed)}</p>` +
+    Object.entries(labels).map(([key,label]) => `<h3>${label}</h3><ul>${(u.counters || []).filter(c=>c.bucket===key).slice(0,10).map(c=>`<li><span class="tag">${esc(c.key)}</span> ${esc(c.count)}회</li>`).join('') || '<li>기록 없음</li>'}</ul>`).join('');
+  $('usageDrawer').showModal();
+}
+
 // ── 탭 ──────────────────────────────────────────────
 document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll(".tabs button").forEach((x) => x.classList.remove("active"));
@@ -2258,6 +2317,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   document.querySelectorAll('.areas button').forEach(x => { x.classList.toggle('active', x.dataset.area === b.dataset.group); x.setAttribute('aria-pressed', String(x.dataset.area === b.dataset.group)); });
   history.replaceState(null, '', '#' + b.dataset.page);
   try { localStorage.setItem("adm_tab", b.dataset.page); } catch {}
+  if (b.dataset.page === "usage") cachedTab("usage", loadUsage).catch(() => {});
   if (b.dataset.page === "finance") cachedTab("finance", () => loadFinanceSummary());
   if (b.dataset.page === "payments") cachedTab("payments", () => loadPayments()).catch((e) => toast(safeError()));
   if (b.dataset.page === "rebate") cachedTab("rebate", () => loadRebate()).catch((e) => toast("리베이트 불러오기 실패: " + safeError()));
