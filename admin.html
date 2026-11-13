@@ -114,6 +114,8 @@
   #stats .stat:nth-child(5) { background:#e6f2fc; }#stats .stat:nth-child(6) { background:#fff4e9; }#stats .stat:nth-child(7) { background:#f4e8f9; }#stats .stat:nth-child(8) { background:#e9f4d9; }
   #todayTasks button { display:flex;justify-content:space-between;width:100%;margin:6px 0;text-align:left; }
   #financeSummary summary { display:inline-block;cursor:pointer;padding:9px 16px;border-radius:999px;background:#eee7ff;color:#59499a;margin:8px 0; }
+  #courseForm .form-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:16px; }
+  #courseForm label { display:flex;flex-direction:column;gap:6px; }
   .finance-chart { width:100%;height:260px; }.chart-bar { transform-origin:bottom;animation:barGrow .65s ease-out;transform-box:fill-box; }
   @keyframes barGrow { from { transform:scaleY(0); } to { transform:scaleY(1); } }
   .chart-legend { display:flex;gap:16px;flex-wrap:wrap; }.chart-tip { position:fixed;z-index:50;background:#493a53;color:white;padding:10px;border-radius:12px;pointer-events:none;white-space:pre-line; }
@@ -166,6 +168,7 @@
       <button data-page="users" data-group="students" class="active">수강생 목록</button>
       <button data-page="activity" data-group="students" >수강생 활동</button>
       <button data-page="usage" data-group="students">📊 사용 현황</button>
+      <button data-page="course-receipts" data-group="money" hidden>🎓 강의 입금</button>
       <button data-page="finance" data-group="money" class="" hidden>요약</button>
       <button data-page="deposits" data-group="money" class="" hidden>입금 확인 → 자동 연장</button>
       <button data-page="payments" data-group="money" class="" hidden>결제/이용권 기록</button>
@@ -176,6 +179,15 @@
       <button data-page="incidents" data-group="operations" class="" hidden>클라이언트 사고 (읽기 전용)</button>
       <button data-page="config" data-group="settings" class="" hidden>앱 설정 배포</button>
     </div>
+<section class="page" id="page-course-receipts"><div class="card"><h2>🎓 강의 입금</h2>
+<form id="courseForm" onsubmit="saveCourseReceipt(event)"><div class="form-grid">
+<label>입금일<input id="courseDate" type="date" required></label>
+<label>이름<input id="courseName" maxlength="40" required></label>
+<label>금액<input id="courseAmount" inputmode="numeric" required oninput="this.value=this.value.replace(/[^0-9]/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,',')"></label>
+<label>강의명<input id="courseTitle" list="courseTitles" maxlength="60"><datalist id="courseTitles"></datalist></label>
+<label>유입 경로<select id="courseChannel"><option>인스타</option><option>카톡</option><option>블로그</option><option>유튜브</option><option>지인</option><option>기타</option></select></label>
+<label>메모<input id="courseMemo" maxlength="300"></label></div><button class="btn primary" id="courseSave">저장</button></form>
+</div><div class="card"><label>조회 월 <input id="courseMonth" type="month" onchange="loadCourseReceipts()"></label><div id="courseSummary" class="stats" aria-live="polite"></div><div id="courseBreakdown"></div><div class="tbl-wrap"><table><thead><tr><th>날짜</th><th>이름</th><th>금액</th><th>강의</th><th>유입</th><th>메모</th><th>상태</th></tr></thead><tbody id="courseRows"></tbody></table></div></div></section>
     <div class="page" id="page-finance"><div class="card"><h2>💰 돈 관리 요약</h2><div id="financeSummary" aria-live="polite"></div></div></div>
 
     <section class="page" id="page-usage">
@@ -659,7 +671,7 @@ try { $("sbUrl").value = localStorage.getItem("sb_url") || ""; $("sbKey").value 
 if (!$("sbUrl").value) $("sbUrl").value = DEFAULT_SB_URL;
 if (!$("sbKey").value) $("sbKey").value = DEFAULT_SB_KEY;
 async function rpc(name, params = {}) {
-  const mutation = /^admin_/.test(name) && !["admin_usage_summary","admin_finance_summary","admin_ledger_links","admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
+  const mutation = /^admin_/.test(name) && !["admin_course_receipt_list","admin_usage_summary","admin_finance_summary","admin_ledger_links","admin_coupang_safety","admin_stats","admin_users","admin_rebates","admin_payments","admin_activity","admin_activity_page","admin_coupang_activity_page","admin_activity_trend","admin_log_recent"].includes(name);
   if (mutation && !requireFresh("core")) throw Error("stale");
   if (mutation) { mutationPending = true; const state = datasetState("core"); ++state.generation; state.status = "stale"; showDataStatus(); }
   try {
@@ -1670,13 +1682,45 @@ async function zeroSales(uid, pm) {
     toast("매출 0원 완료"); await loadRebate();
   } catch { toast("처리 실패: " + safeError()); }
 }
+let courseReceipts = [];
+async function loadCourseReceipts() {
+  if (!$('courseDate').value) $('courseDate').value = [new Date().getFullYear(),String(new Date().getMonth()+1).padStart(2,'0'),String(new Date().getDate()).padStart(2,'0')].join('-');
+  if (!$('courseMonth').dataset.initialized) { $('courseMonth').value=ymNow(); $('courseMonth').dataset.initialized='yes'; }
+  try {
+    const data = await rpc('admin_course_receipt_list', {p_month:null});
+    courseReceipts=data.receipts || [];
+    $('courseTitles').innerHTML=[...new Set(courseReceipts.map(r=>r.course).filter(Boolean))].map(c=>`<option value="${esc(c)}"></option>`).join('');
+    const rows=courseReceipts.filter(r=>!$('courseMonth').value || r.received_on.slice(0,7)===$('courseMonth').value);
+    const active=rows.filter(r=>!r.voided_at), total=active.reduce((a,r)=>a+BigInt(r.amount),0n);
+    $('courseSummary').innerHTML=`<div class="stat"><div class="k">입금 합계</div><div class="v">${won(total)}</div></div><div class="stat"><div class="k">입금 건수</div><div class="v">${active.length}건</div></div>`;
+    const channels=new Map(); active.forEach(r=>{const key=r.channel || '기타', v=channels.get(key) || [0,0n]; channels.set(key,[v[0]+1,v[1]+BigInt(r.amount)]);});
+    $('courseBreakdown').innerHTML=[...channels].map(([c,v])=>`<span class="tag">${esc(c)} · ${v[0]}건 · ${won(v[1])}</span>`).join(' ');
+    $('courseRows').innerHTML=rows.map(r=>`<tr><td>${esc(r.received_on)}</td><td>${avatar({id:r.payer_name,name:r.payer_name})}${esc(r.payer_name)}</td><td class="num">${won(r.amount)}</td><td>${esc(r.course)}</td><td><span class="tag">${esc(r.channel)}</span></td><td>${esc(r.memo)}</td><td>${r.voided_at?`<span class="tag muted">취소</span> ${esc(r.void_reason)}`:`<button class="btn ghost" data-course-id="${esc(r.id)}">취소</button>`}</td></tr>`).join('') || '<tr><td colspan="7">입금 기록 없음</td></tr>';
+    $('courseRows').querySelectorAll('[data-course-id]').forEach(b=>b.onclick=()=>voidCourseReceipt(b.dataset.courseId));
+  } catch { $('courseRows').textContent='강의 입금 불러오기 실패'; }
+}
+async function saveCourseReceipt(event) {
+  event.preventDefault();
+  const args={p_received_on:$('courseDate').value,p_payer_name:$('courseName').value.trim(),p_amount:$('courseAmount').value.replace(/,/g,''),p_course:$('courseTitle').value,p_channel:$('courseChannel').value,p_memo:$('courseMemo').value};
+  if (!args.p_payer_name || !/^[0-9]+$/.test(args.p_amount) || BigInt(args.p_amount)<=0n || BigInt(args.p_amount)>9223372036854775807n) { toast('이름과 양수 금액 확인 필요'); return; }
+  if (!confirm(`${args.p_payer_name} · ${won(args.p_amount)} · ${args.p_received_on} 입금을 저장할까요?`)) return;
+  $('courseSave').disabled=true;
+  try { await rpc('admin_course_receipt_add',args); $('courseName').value=''; $('courseAmount').value=''; $('courseMemo').value=''; tabCache.delete('finance'); await reloadAll(false); await loadCourseReceipts(); toast('저장 완료'); }
+  catch { toast('저장 실패: '+safeError()); }
+  finally { $('courseSave').disabled=false; }
+}
+async function voidCourseReceipt(id) {
+  const reason=prompt('취소 사유를 입력해 주세요'); if (!reason?.trim()) return;
+  try { await rpc('admin_course_receipt_void',{p_id:id,p_reason:reason.trim()}); tabCache.delete('finance'); await reloadAll(false); await loadCourseReceipts(); toast('취소 완료'); }
+  catch { toast('취소 실패: '+safeError()); }
+}
 function financeChart(data) {
   const months = [...new Set((data.monthly || []).map(r=>r.month))].sort();
-  const streams = ['rebate','fee','asep'], colors = ['#b5a1ef','#8cd4b5','#f4bd88'], labels = ['리베이트','프로그램비','에이셉'];
+  const streams = ['rebate','fee','asep','course'], colors = ['#b5a1ef','#8cd4b5','#f4bd88','#edb5d2'], labels = ['리베이트','프로그램비','에이셉','강의'];
   const values = months.map(m=>streams.map(k=>Number((data.monthly || []).find(r=>r.month===m && r.stream===k)?.amount || 0)));
   const max = Math.max(1,...values.map(v=>v.reduce((a,b)=>a+b,0)));
   const width = Math.max(360,months.length*80), slot = (width-40)/Math.max(1,months.length);
-  return `<div class="chart-legend">${labels.map((l,i)=>`<span style="color:${colors[i]}">● <span style="color:var(--text)">${l}</span></span>`).join('')}</div><div class="tbl-wrap"><svg class="finance-chart" viewBox="0 0 ${width} 260" role="img" aria-label="월별 리베이트 프로그램비 에이셉 수익 누적 막대 차트">${months.map((m,i)=>{ let y=220; const tip = m+'\n'+labels.map((l,j)=>l+': '+won(values[i][j])).join('\n'); return `<g tabindex="0" data-chart-tip="${esc(tip)}"><title>${esc(tip)}</title>${values[i].map((v,j)=>{ const h=Math.max(0,v/max*185); y-=h; return `<rect class="chart-bar" x="${25+i*slot}" y="${y}" width="${slot*.6}" height="${h}" rx="4" fill="${colors[j]}"/>`; }).join('')}<text x="${25+i*slot}" y="245" font-size="12" fill="currentColor">${esc(m)}</text></g>`; }).join('')}</svg></div>`;
+  return `<div class="chart-legend">${labels.map((l,i)=>`<span style="color:${colors[i]}">● <span style="color:var(--text)">${l}</span></span>`).join('')}</div><div class="tbl-wrap"><svg class="finance-chart" viewBox="0 0 ${width} 260" role="img" aria-label="월별 리베이트 프로그램비 에이셉 강의 수익 누적 막대 차트">${months.map((m,i)=>{ let y=220; const tip = m+'\n'+labels.map((l,j)=>l+': '+won(values[i][j])).join('\n'); return `<g tabindex="0" data-chart-tip="${esc(tip)}"><title>${esc(tip)}</title>${values[i].map((v,j)=>{ const h=Math.max(0,v/max*185); y-=h; return `<rect class="chart-bar" x="${25+i*slot}" y="${y}" width="${slot*.6}" height="${h}" rx="4" fill="${colors[j]}"/>`; }).join('')}<text x="${25+i*slot}" y="245" font-size="12" fill="currentColor">${esc(m)}</text></g>`; }).join('')}</svg></div>`;
 }
 document.addEventListener('pointerover', event => {
   const bar = event.target.closest('[data-chart-tip]'); if (!bar) return;
@@ -1695,14 +1739,14 @@ async function loadFinanceSummary() {
   const box = $("financeSummary"); box.innerHTML = '<div class="skeleton" role="status">불러오는 중…</div>';
   try {
     const data = await rpc("admin_finance_summary");
-    const label = {rebate:"리베이트", fee:"프로그램비", asep:"에이셉"};
+    const label = {rebate:"리베이트", fee:"프로그램비", asep:"에이셉", course:"강의"};
     const totals = Object.fromEntries((data.totals || []).map(r => [r.stream, BigInt(r.amount)]));
     const months = [...new Set((data.monthly || []).map(r => r.month))].sort().reverse();
     const sum = values => values.reduce((a,b) => a + b, 0n);
-    const streams = ['rebate','fee','asep'];
+    const streams = ['rebate','fee','asep','course'];
     box.innerHTML = `<p class="muted">전체 기록 기준 · 실입금 합계 · 매출 0원 완료는 별도 집계</p>
       <div class="stats">${[...streams,'total'].map(k => `<div class="stat"><div class="k">${label[k] || '🌷 총 수익'} · 전체 기간</div><div class="v">${won(k==='total' ? sum(Object.values(totals)) : totals[k] || 0n)}</div></div>`).join('')}</div>
-      ${financeChart(data)}<div class="tbl-wrap"><table class="finance-months"><thead><tr><th>월</th>${streams.map(k=>`<th class="num">${label[k]}</th>`).join('')}<th class="num">총 수익</th></tr></thead><tbody>${months.map(month => { const values=streams.map(k=>BigInt((data.monthly || []).find(r=>r.month===month && r.stream===k)?.amount || 0)); return `<tr><td>${esc(month)}</td>${values.map((v,i)=>`<td class="num" data-label="${label[streams[i]]}">${won(v)}</td>`).join('')}<td class="num" data-label="총 수익"><b>${won(sum(values))}</b> ${financeChange(data,month,sum(values))}</td></tr>`; }).join('') || '<tr><td colspan="5">입금 기록 없음</td></tr>'}<tr><th>전체 기간 · 총 수익</th>${streams.map(k=>`<td class="num">${won(totals[k] || 0n)}</td>`).join('')}<td class="num"><b>${won(sum(Object.values(totals)))}</b></td></tr></tbody></table></div>
+      ${financeChart(data)}<div class="tbl-wrap"><table class="finance-months"><thead><tr><th>월</th>${streams.map(k=>`<th class="num">${label[k]}</th>`).join('')}<th class="num">총 수익</th></tr></thead><tbody>${months.map(month => { const values=streams.map(k=>BigInt((data.monthly || []).find(r=>r.month===month && r.stream===k)?.amount || 0)); return `<tr><td>${esc(month)}</td>${values.map((v,i)=>`<td class="num" data-label="${label[streams[i]]}">${won(v)}</td>`).join('')}<td class="num" data-label="총 수익"><b>${won(sum(values))}</b> ${financeChange(data,month,sum(values))}</td></tr>`; }).join('') || '<tr><td colspan="6">입금 기록 없음</td></tr>'}<tr><th>전체 기간 · 총 수익</th>${streams.map(k=>`<td class="num">${won(totals[k] || 0n)}</td>`).join('')}<td class="num"><b>${won(sum(Object.values(totals)))}</b></td></tr></tbody></table></div>
       <details><summary>월별 입금 건수와 매출 0원 완료</summary><div class="tbl-wrap"><table><thead><tr><th>월</th><th>구분</th><th class="num">입금 건수</th><th class="num">매출 0원 완료</th></tr></thead><tbody>${(data.monthly || []).map(r=>`<tr><td>${esc(r.month)}</td><td>${esc(label[r.stream] || r.stream)}</td><td class="num">${num(r.count)}</td><td class="num">${num(r.zero_sales_count)}</td></tr>`).join('')}</tbody></table></div></details>
       <details><summary>매출 0원 완료 내역 (${(data.zero_sales || []).length}건)</summary><div class="tbl-wrap"><table><thead><tr><th>지급월</th><th>수강생</th><th>사유</th></tr></thead><tbody>${(data.zero_sales || []).map(r=>`<tr><td>${esc(r.pay_month)}</td><td>${avatar(r)}${esc(r.name || r.email || r.user_id)}</td><td>${esc(r.reason || '')}</td></tr>`).join('')}</tbody></table></div></details>`;
     box.querySelectorAll('details').forEach((details,i) => {
@@ -2373,6 +2417,7 @@ document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("cli
   history.replaceState(null, '', '#' + b.dataset.page);
   try { localStorage.setItem("adm_tab", b.dataset.page); } catch {}
   if (b.dataset.page === "usage") cachedTab("usage", loadUsage).catch(() => {});
+  if (b.dataset.page === "course-receipts") loadCourseReceipts();
   if (b.dataset.page === "finance") cachedTab("finance", () => loadFinanceSummary());
   if (b.dataset.page === "payments") cachedTab("payments", () => loadPayments()).catch((e) => toast(safeError()));
   if (b.dataset.page === "rebate") cachedTab("rebate", () => loadRebate()).catch((e) => toast("리베이트 불러오기 실패: " + safeError()));
